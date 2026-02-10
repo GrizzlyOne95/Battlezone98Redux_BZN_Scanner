@@ -1,6 +1,7 @@
 import os
 import re
 import tkinter as tk
+import struct
 from tkinter import filedialog, messagebox, ttk
 
 # To update this, run the script I gave you previously and paste the result here
@@ -804,6 +805,113 @@ STOCK_ODF_LIST = [
 ]
 STOCK_SET = {name.lower() for name in STOCK_ODF_LIST}
 
+
+class BinaryFieldType:
+    DATA_VOID = 0
+    DATA_BOOL = 1
+    DATA_CHAR = 2
+    DATA_SHORT = 3
+    DATA_LONG = 4
+    DATA_FLOAT = 5
+    DATA_DOUBLE = 6
+    DATA_ID = 7
+    DATA_PTR = 8
+    DATA_VEC3D = 9
+    DATA_VEC2D = 10
+    DATA_MAT3DOLD = 11
+    DATA_MAT3D = 12
+    DATA_STRING = 13
+    DATA_QUAT = 14
+
+class BZNParser:
+    def __init__(self, filepath):
+        self.filepath = filepath
+        self.odf_matches = set()
+
+    def parse(self):
+        try:
+            with open(self.filepath, 'rb') as f:
+                data = f.read()
+
+            # Always run ASCII extraction on the whole file first as it catches ODFs in both formats
+            content_text = data.decode('ascii', errors='ignore')
+            self._parse_ascii(content_text)
+            
+            # Detect if it's binary and find where binary starts
+            # Look for binarySave flag in the header
+            binary_save_match = re.search(r"binarySave\s*\[\d+\]\s*=\s*(true|1)", content_text)
+            if binary_save_match:
+                # Binary data starts after the binarySave line value
+                # Usually there's a msn_filename and other fields as binary tokens
+                # We'll start scanning from the end of the binarySave match
+                binary_start_pos = binary_save_match.end()
+                # Skip any whitespace/newlines after the "true"
+                while binary_start_pos < len(data) and data[binary_start_pos] in b' \t\r\n':
+                    binary_start_pos += 1
+                
+                self._parse_binary(data, binary_start_pos)
+
+            return self.odf_matches
+        except Exception as e:
+            print(f"Error parsing {self.filepath}: {e}")
+            return set()
+
+    def _parse_ascii(self, content):
+        # Extract PrjID, buildClass, dropClass, curPilot, label
+        tags = [r"PrjID", r"buildClass", r"dropClass", r"curPilot", r"label"]
+        for tag in tags:
+            # Handle both quoted and unquoted values, and optional newlines after =
+            pattern = fr"{tag}\s*\[\d+\]\s*=\s*(?:\"([^\"]+)\"|([\w\d_-]+))"
+            matches = re.finditer(pattern, content)
+            for match in matches:
+                m = match.group(1) or match.group(2)
+                if m and not m.isdigit():
+                    self.odf_matches.add(m)
+        
+        # BZ1 legacy format matches
+        matches = re.finditer(r"PrjID\s*=\s*(?:\"([^\"]+)\"|([\w\d_-]+))", content)
+        for match in matches:
+            m = match.group(1) or match.group(2)
+            if m and not m.isdigit():
+                self.odf_matches.add(m)
+
+    def _parse_binary(self, data, start_pos):
+        # Sequential binary parsing is much more reliable than scanning
+        pos = start_pos
+        while pos + 4 <= len(data):
+            try:
+                # Type code (2 bytes, usually only first byte is used)
+                type_code = data[pos]
+                # Size (2 bytes)
+                size_bytes = data[pos+2:pos+4]
+                size = struct.unpack("<H", size_bytes)[0]
+                
+                chunk_start = pos + 4
+                if chunk_start + size > len(data):
+                    break # End of data or malformed
+                
+                # Only trust DATA_ID (7) for ODF names. DATA_CHAR (2) are labels.
+                if type_code == BinaryFieldType.DATA_ID:
+                    value_bytes = data[chunk_start:chunk_start+size]
+                    value = value_bytes.decode('ascii', errors='ignore').strip('\x00')
+                    # Sanity check for ODF names
+                    if re.match(r"^[a-zA-Z0-9_-]+$", value) and not value.isdigit():
+                        if 3 <= len(value) <= 64:
+                            self.odf_matches.add(value)
+                elif type_code == BinaryFieldType.DATA_CHAR:
+                    # Labels can sometimes contain ODF names if the user named them that way,
+                    # but it's safer to skip them to avoid false positives.
+                    # For now, we'll exclude them unless we find a reason to include.
+                    pass
+                
+                # Move to the next token
+                pos = chunk_start + size
+            except:
+                # If sequential parsing fails, we might be desynced.
+                # In a robust parser we'd handle this, but for dependency scanning
+                # we can just stop or try to resync.
+                break
+
 class BZNAnalyzer:
     def __init__(self, root):
         self.root = root
@@ -853,9 +961,8 @@ class BZNAnalyzer:
         directory = os.path.dirname(self.current_file)
         
         try:
-            with open(self.current_file, 'rb') as f:
-                content = f.read().decode('ascii', errors='ignore')
-                matches = set(re.findall(r"PrjID \[1\] =\s+([\w\d_-]+)", content))
+            parser = BZNParser(self.current_file)
+            matches = parser.parse()
 
             for odf_base in matches:
                 filename = f"{odf_base}.odf"
