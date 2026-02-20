@@ -29,16 +29,19 @@ jobs:
       if: runner.os == 'Windows'
       run: |
         pyinstaller --onefile --windowed --name "bzn_scan" bzn_scan.py
+        move dist\bzn_scan.exe dist\bzn_scan-windows.exe
     
     - name: Build executable (Linux)
       if: runner.os == 'Linux'
       run: |
         pyinstaller --onefile --name "bzn_scan" bzn_scan.py
+        mv dist/bzn_scan dist/bzn_scan-linux
     
     - name: Build executable (macOS)
       if: runner.os == 'macOS'
       run: |
         pyinstaller --onefile --windowed --name "bzn_scan" bzn_scan.py
+        mv dist/bzn_scan dist/bzn_scan-macos
     
     - name: List build artifacts
       run: |
@@ -47,25 +50,25 @@ jobs:
       shell: bash
     
     - name: Upload artifacts (Windows)
-      if: runner.os == 'Windows' && hashFiles('dist/bzn_scan.exe') != ''
+      if: runner.os == 'Windows' && hashFiles('dist/bzn_scan-windows.exe') != ''
       uses: actions/upload-artifact@v4
       with:
         name: bzn_scan-windows
-        path: dist/bzn_scan.exe
+        path: dist/bzn_scan-windows.exe
     
     - name: Upload artifacts (Linux)
-      if: runner.os == 'Linux' && hashFiles('dist/bzn_scan') != ''
+      if: runner.os == 'Linux' && hashFiles('dist/bzn_scan-linux') != ''
       uses: actions/upload-artifact@v4
       with:
         name: bzn_scan-linux
-        path: dist/bzn_scan
+        path: dist/bzn_scan-linux
     
     - name: Upload artifacts (macOS)
-      if: runner.os == 'macOS' && hashFiles('dist/bzn_scan') != ''
+      if: runner.os == 'macOS' && hashFiles('dist/bzn_scan-macos') != ''
       uses: actions/upload-artifact@v4
       with:
         name: bzn_scan-macos
-        path: dist/bzn_scan
+        path: dist/bzn_scan-macos
   
   release:
     needs: build
@@ -91,7 +94,7 @@ jobs:
       with:
         token: ${{ secrets.GITHUB_TOKEN }}
         files: |
-          bzn_scan-windows/bzn_scan.exe
-          bzn_scan-linux/bzn_scan
-          bzn_scan-macos/bzn_scan
+          bzn_scan-windows/bzn_scan-windows.exe
+          bzn_scan-linux/bzn_scan-linux
+          bzn_scan-macos/bzn_scan-macos
         fail_on_unmatched_files: false
