@@ -87,10 +87,9 @@ jobs:
     - name: Create Release
       uses: softprops/action-gh-release@v1
       with:
+        token: ${{ secrets.GITHUB_TOKEN }}
         files: |
           bzn_scan-windows/bzn_scan.exe
           bzn_scan-linux/bzn_scan
           bzn_scan-macos/bzn_scan
         fail_on_unmatched_files: false
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
