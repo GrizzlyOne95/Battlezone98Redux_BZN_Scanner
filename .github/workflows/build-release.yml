@@ -28,8 +28,7 @@ jobs:
     - name: Build executable (Windows)
       if: runner.os == 'Windows'
       run: |
-        pyinstaller --onefile --windowed --name "bzn_scan" --icon=bzn_scan.ico 2>/dev/null || pyinstaller --onefile --windowed --name "bzn_scan" bzn_scan.py
-      continue-on-error: true
+        pyinstaller --onefile --windowed --name "bzn_scan" bzn_scan.py
     
     - name: Build executable (Linux)
       if: runner.os == 'Linux'
@@ -41,22 +40,28 @@ jobs:
       run: |
         pyinstaller --onefile --windowed --name "bzn_scan" bzn_scan.py
     
+    - name: List build artifacts
+      run: |
+        echo "Checking dist directory..."
+        if [ -d "dist" ]; then ls -la dist/; else echo "dist directory not found"; fi
+      shell: bash
+    
     - name: Upload artifacts (Windows)
-      if: runner.os == 'Windows'
+      if: runner.os == 'Windows' && hashFiles('dist/bzn_scan.exe') != ''
       uses: actions/upload-artifact@v4
       with:
         name: bzn_scan-windows
         path: dist/bzn_scan.exe
     
     - name: Upload artifacts (Linux)
-      if: runner.os == 'Linux'
+      if: runner.os == 'Linux' && hashFiles('dist/bzn_scan') != ''
       uses: actions/upload-artifact@v4
       with:
         name: bzn_scan-linux
         path: dist/bzn_scan
     
     - name: Upload artifacts (macOS)
-      if: runner.os == 'macOS'
+      if: runner.os == 'macOS' && hashFiles('dist/bzn_scan') != ''
       uses: actions/upload-artifact@v4
       with:
         name: bzn_scan-macos
@@ -65,12 +70,19 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    if: success()
     
     steps:
     - uses: actions/checkout@v4
     
     - name: Download all artifacts
       uses: actions/download-artifact@v4
+      continue-on-error: true
+    
+    - name: List artifacts
+      run: |
+        echo "Artifacts downloaded:"
+        find . -type f -name "bzn_scan*" 2>/dev/null || echo "No artifacts found"
     
     - name: Create Release
       uses: softprops/action-gh-release@v1
@@ -79,5 +91,6 @@ jobs:
           bzn_scan-windows/bzn_scan.exe
           bzn_scan-linux/bzn_scan
           bzn_scan-macos/bzn_scan
+        fail_on_unmatched_files: false
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
