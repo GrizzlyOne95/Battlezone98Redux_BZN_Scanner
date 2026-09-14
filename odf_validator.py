@@ -1,9 +1,9 @@
 """Battlezone 98 Redux ODF validation.
 
 The validator is intentionally conservative: it reports loader mismatches and
-known crash-risk omissions without rewriting user files. The rule data lives in
-odf_schema.py so the checker can grow toward a codebase-derived schema instead
-of accumulating one-off conditionals.
+known crash-risk omissions without rewriting user files. Rule data lives in
+odf_schema.py, while odf_inheritance.py resolves only inheritance that can be
+proven from the scanned package.
 """
 
 from __future__ import annotations
@@ -15,6 +15,12 @@ import re
 from typing import Dict, Iterable, List, Mapping, Sequence, Tuple
 import zipfile
 
+from odf_inheritance import (
+    InheritanceState,
+    build_inheritance_graph,
+    canonical_base_reference,
+    merge_effective_sections,
+)
 from odf_schema import LOADER_RULES, REFERENCE_KEYS, LoaderRule
 
 
@@ -126,6 +132,11 @@ def _issue(
     )
 
 
+def _effective_document(doc: ODFDocument, state: InheritanceState) -> ODFDocument:
+    sections, names = merge_effective_sections(state)
+    return ODFDocument(path=doc.path, sections=sections, original_sections=names)
+
+
 def _rule_matches(doc: ODFDocument, rule: LoaderRule) -> bool:
     if rule.class_labels and doc.class_label() not in {label.lower() for label in rule.class_labels}:
         return False
@@ -142,64 +153,108 @@ def _active_rule_section(doc: ODFDocument, rule: LoaderRule) -> tuple[str | None
     return None, False
 
 
-def _validate_loader_rules(doc: ODFDocument) -> List[ODFIssue]:
+def _validate_loader_rules(
+    doc: ODFDocument,
+    effective: ODFDocument,
+    inheritance_complete: bool,
+) -> List[ODFIssue]:
     issues: List[ODFIssue] = []
 
     for rule in LOADER_RULES:
-        if not _rule_matches(doc, rule):
+        if not _rule_matches(effective, rule):
             continue
 
-        section, is_legacy = _active_rule_section(doc, rule)
-        if section is None:
-            # Absence alone is not an error yet: ODF inheritance may supply the
-            # class-specific section from baseName. Until inheritance resolution
-            # is implemented, only diagnose a canonical or known-legacy section
-            # that is actually present in this file.
-            continue
+        local_section, is_legacy = _active_rule_section(doc, rule)
 
-        if is_legacy:
+        # Diagnose only declarations physically present in this ODF. Parent
+        # files are validated independently, which prevents duplicate migration
+        # findings across every inheriting child.
+        if local_section is not None and is_legacy:
             issues.append(_issue(
                 rule.section_severity,
                 doc,
-                section,
+                local_section,
                 "",
                 rule.section_message,
-                f"Rename [{section}] to [{rule.expected_section}].",
+                f"Rename [{local_section}] to [{rule.expected_section}].",
                 rule.source,
                 rule.rule_id,
             ))
 
-        keys = doc.keys(section)
+        if local_section is not None:
+            local_keys = doc.keys(local_section)
+            for alias in rule.key_aliases:
+                if alias.legacy_only and not is_legacy:
+                    continue
+                entry = local_keys.get(alias.legacy.lower())
+                if not entry:
+                    continue
+                _value, line, original_key = entry
+                # Case-only aliases are intentionally exact. We do not invent
+                # global key-case rules from one recovered loader spelling.
+                if original_key != alias.legacy:
+                    continue
+                issues.append(_issue(
+                    alias.severity,
+                    doc,
+                    local_section,
+                    original_key,
+                    alias.message or f"'{original_key}' is not the Redux loader key spelling.",
+                    f"Use '{alias.canonical}'.",
+                    rule.source,
+                    rule.rule_id,
+                    line,
+                ))
 
-        for alias in rule.key_aliases:
-            if alias.legacy_only and not is_legacy:
-                continue
-            entry = keys.get(alias.legacy.lower())
-            if not entry:
-                continue
-            _value, line, original_key = entry
-            # If the alias differs only by case, only flag the exact legacy
-            # spelling encoded in the schema; this avoids inventing case rules.
-            if original_key != alias.legacy:
-                continue
+            for legacy_key in rule.legacy_keys:
+                entry = local_keys.get(legacy_key.name.lower())
+                if not entry:
+                    continue
+                _value, line, original_key = entry
+                issues.append(_issue(
+                    legacy_key.severity,
+                    doc,
+                    local_section,
+                    original_key,
+                    legacy_key.message,
+                    legacy_key.suggestion,
+                    rule.source,
+                    rule.rule_id,
+                    line,
+                ))
+
+        # A missing section is only meaningful when the entire inheritance
+        # chain is locally resolved. Opaque stock parents may contain it.
+        if (
+            inheritance_complete
+            and rule.missing_section_message
+            and not effective.has_section(rule.expected_section)
+            and not is_legacy
+        ):
             issues.append(_issue(
-                alias.severity,
+                rule.missing_section_severity or rule.section_severity,
                 doc,
-                section,
-                original_key,
-                alias.message or f"'{original_key}' is not the Redux loader key spelling.",
-                f"Use '{alias.canonical}'.",
+                rule.expected_section,
+                "",
+                rule.missing_section_message,
+                rule.missing_section_suggestion,
                 rule.source,
                 rule.rule_id,
-                line,
             ))
+            # Required keys cannot add useful information when the entire
+            # loader section itself is absent.
+            continue
 
-        # Required keys are enforced on the canonical loader section. A legacy
-        # section may contain the key text, but Redux will not load it.
-        if not is_legacy:
-            canonical_keys = doc.keys(rule.expected_section)
+        # Required keys use the effective canonical section once inheritance is
+        # fully known. For incomplete/opaque chains, only an explicitly blank
+        # local value is conclusive; absence may be supplied by the parent.
+        if rule.required_keys and effective.has_section(rule.expected_section):
+            effective_keys = effective.keys(rule.expected_section)
+            local_canonical_keys = doc.keys(rule.expected_section) if doc.has_section(rule.expected_section) else {}
             for required in rule.required_keys:
-                if required.name.lower() not in canonical_keys or not _unquote(canonical_keys[required.name.lower()][0]):
+                required_lower = required.name.lower()
+                local_entry = local_canonical_keys.get(required_lower)
+                if local_entry is not None and not _unquote(local_entry[0]):
                     issues.append(_issue(
                         required.severity,
                         doc,
@@ -209,29 +264,36 @@ def _validate_loader_rules(doc: ODFDocument) -> List[ODFIssue]:
                         required.suggestion,
                         rule.source,
                         rule.rule_id,
+                        local_entry[1],
                     ))
+                    continue
 
-        for legacy_key in rule.legacy_keys:
-            entry = keys.get(legacy_key.name.lower())
-            if not entry:
-                continue
-            _value, line, original_key = entry
-            issues.append(_issue(
-                legacy_key.severity,
-                doc,
-                section,
-                original_key,
-                legacy_key.message,
-                legacy_key.suggestion,
-                rule.source,
-                rule.rule_id,
-                line,
-            ))
+                if not inheritance_complete:
+                    continue
+
+                effective_entry = effective_keys.get(required_lower)
+                if effective_entry is None or not _unquote(effective_entry[0]):
+                    issues.append(_issue(
+                        required.severity,
+                        doc,
+                        rule.expected_section,
+                        required.name,
+                        required.message,
+                        required.suggestion,
+                        rule.source,
+                        rule.rule_id,
+                        effective_entry[1] if effective_entry else 0,
+                    ))
 
     return issues
 
 
 def _validate_references(doc: ODFDocument, available: set[str]) -> List[ODFIssue]:
+    """Validate references declared in this physical ODF.
+
+    Parent files are validated independently. This avoids repeating the same
+    inherited missing-reference warning on every descendant.
+    """
     issues: List[ODFIssue] = []
     if not available:
         return issues
@@ -272,9 +334,76 @@ def _validate_references(doc: ODFDocument, available: set[str]) -> List[ODFIssue
     return issues
 
 
+def _validate_inheritance(doc: ODFDocument, state: InheritanceState, duplicate_name: bool) -> List[ODFIssue]:
+    ref = canonical_base_reference(doc)
+    if ref is None:
+        return []
+
+    if duplicate_name:
+        return [_issue(
+            "ERROR",
+            doc,
+            ref.section,
+            "baseName",
+            f"ODF basename '{doc.path.name}' is duplicated in the scanned package, so inheritance resolution is ambiguous.",
+            "Keep only one ODF with this filename in the effective package namespace.",
+            "ODF baseName inheritance namespace",
+            "inheritance-ambiguous-name",
+            ref.line,
+        )]
+
+    if state.status == "cycle":
+        cycle = " -> ".join(state.cycle) if state.cycle else state.target
+        return [_issue(
+            "ERROR",
+            doc,
+            ref.section,
+            "baseName",
+            f"baseName inheritance cycle detected: {cycle}.",
+            "Break the baseName cycle; inheritance must terminate at a non-cyclic parent.",
+            "ODF baseName inheritance graph",
+            "inheritance-cycle",
+            ref.line,
+        )]
+
+    if state.status == "ambiguous":
+        return [_issue(
+            "ERROR",
+            doc,
+            ref.section,
+            "baseName",
+            f"baseName '{state.target}' resolves to multiple ODFs in the scanned package.",
+            "Remove the duplicate filename collision so the parent is unambiguous.",
+            "ODF baseName inheritance graph",
+            "inheritance-ambiguous-parent",
+            ref.line,
+        )]
+
+    if state.status == "missing":
+        return [_issue(
+            "ERROR",
+            doc,
+            ref.section,
+            "baseName",
+            f"baseName parent '{state.target}' was not found in the local or known stock ODF namespace.",
+            "Add the parent ODF to the package or correct baseName.",
+            "ODF baseName inheritance graph",
+            "inheritance-missing-parent",
+            ref.line,
+        )]
+
+    # Opaque means a known stock parent exists but its contents are not bundled
+    # with the scanner. That is valid; it simply prevents absence-based claims.
+    return []
+
+
 def validate_document(doc: ODFDocument, available_odfs: Iterable[str] = ()) -> List[ODFIssue]:
+    """Validate one standalone document without guessing external inheritance."""
     available = {name.lower() for name in available_odfs}
-    issues = _validate_loader_rules(doc)
+    ref = canonical_base_reference(doc)
+    state = InheritanceState("complete", (doc,)) if ref is None else InheritanceState("opaque", (doc,), target=ref.parent)
+    effective = _effective_document(doc, state)
+    issues = _validate_loader_rules(doc, effective, state.complete)
     issues.extend(_validate_references(doc, available))
     return issues
 
@@ -288,18 +417,38 @@ def _sort_issues(issues: List[ODFIssue]) -> List[ODFIssue]:
             x.line or 1_000_000,
             x.section.lower(),
             x.key.lower(),
+            x.rule_id,
         )
     )
     return issues
 
 
-def validate_documents(documents: Sequence[ODFDocument], known_odfs: Iterable[str] = ()) -> List[ODFIssue]:
-    available = {doc.path.name.lower() for doc in documents}
-    available.update(name.lower() for name in known_odfs)
+def _validate_document_set(
+    all_documents: Sequence[ODFDocument],
+    selected_documents: Sequence[ODFDocument],
+    known_odfs: Iterable[str] = (),
+) -> List[ODFIssue]:
+    known = {name.lower() for name in known_odfs}
+    available = {doc.path.name.lower() for doc in all_documents}
+    available.update(known)
+
+    graph = build_inheritance_graph(all_documents, known)
     issues: List[ODFIssue] = []
-    for doc in documents:
-        issues.extend(validate_document(doc, available))
+
+    for doc in selected_documents:
+        state = graph.state_for(doc)
+        effective = _effective_document(doc, state)
+        duplicate_name = doc.path.name.lower() in graph.duplicates
+
+        issues.extend(_validate_inheritance(doc, state, duplicate_name))
+        issues.extend(_validate_loader_rules(doc, effective, state.complete))
+        issues.extend(_validate_references(doc, available))
+
     return _sort_issues(issues)
+
+
+def validate_documents(documents: Sequence[ODFDocument], known_odfs: Iterable[str] = ()) -> List[ODFIssue]:
+    return _validate_document_set(documents, documents, known_odfs)
 
 
 def validate_directory(
@@ -308,38 +457,35 @@ def validate_directory(
     known_odfs: Iterable[str] = (),
 ) -> List[ODFIssue]:
     root = Path(directory)
-    paths = [p for p in root.iterdir() if p.is_file() and p.suffix.lower() == ".odf"]
-    if filenames is not None:
-        wanted = {Path(name).name.lower() for name in filenames}
-        paths = [p for p in paths if p.name.lower() in wanted]
-    paths.sort(key=lambda p: p.name.lower())
+    paths = sorted(
+        (p for p in root.iterdir() if p.is_file() and p.suffix.lower() == ".odf"),
+        key=lambda p: p.name.lower(),
+    )
+    wanted = None if filenames is None else {Path(name).name.lower() for name in filenames}
 
-    documents: List[ODFDocument] = []
+    all_documents: List[ODFDocument] = []
     issues: List[ODFIssue] = []
     for path in paths:
         try:
-            documents.append(parse_odf(path))
+            all_documents.append(parse_odf(path))
         except OSError as exc:
-            issues.append(ODFIssue(
-                severity="ERROR",
-                filename=path.name,
-                section="",
-                key="",
-                message=f"Could not read ODF: {exc}",
-                source="filesystem",
-                rule_id="read-error",
-            ))
+            if wanted is None or path.name.lower() in wanted:
+                issues.append(ODFIssue(
+                    severity="ERROR",
+                    filename=path.name,
+                    section="",
+                    key="",
+                    message=f"Could not read ODF: {exc}",
+                    source="filesystem",
+                    rule_id="read-error",
+                ))
 
-    available = {p.name.lower() for p in paths}
-    # The available namespace should include every local ODF even when only a
-    # subset is being validated, so references can resolve against siblings.
-    try:
-        available.update(p.name.lower() for p in root.iterdir() if p.is_file() and p.suffix.lower() == ".odf")
-    except OSError:
-        pass
-    available.update(name.lower() for name in known_odfs)
-    for doc in documents:
-        issues.extend(validate_document(doc, available))
+    if wanted is None:
+        selected = all_documents
+    else:
+        selected = [doc for doc in all_documents if doc.path.name.lower() in wanted]
+
+    issues.extend(_validate_document_set(all_documents, selected, known_odfs))
     return _sort_issues(issues)
 
 
@@ -350,7 +496,7 @@ def validate_zip(
 ) -> List[ODFIssue]:
     """Validate ODFs directly inside a ZIP without extracting files to disk."""
     wanted = None if filenames is None else {Path(name).name.lower() for name in filenames}
-    documents: List[ODFDocument] = []
+    all_documents: List[ODFDocument] = []
     issues: List[ODFIssue] = []
 
     try:
@@ -359,24 +505,21 @@ def validate_zip(
                 info for info in zf.infolist()
                 if not info.is_dir() and Path(info.filename).suffix.lower() == ".odf"
             ]
-            available = {Path(info.filename).name.lower() for info in odf_infos}
-            available.update(name.lower() for name in known_odfs)
             for info in odf_infos:
                 name = Path(info.filename).name
-                if wanted is not None and name.lower() not in wanted:
-                    continue
                 try:
-                    documents.append(parse_odf_bytes(zf.read(info), info.filename))
+                    all_documents.append(parse_odf_bytes(zf.read(info), info.filename))
                 except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
-                    issues.append(ODFIssue(
-                        severity="ERROR",
-                        filename=name,
-                        section="",
-                        key="",
-                        message=f"Could not read ODF from ZIP: {exc}",
-                        source="ZIP archive",
-                        rule_id="read-error",
-                    ))
+                    if wanted is None or name.lower() in wanted:
+                        issues.append(ODFIssue(
+                            severity="ERROR",
+                            filename=name,
+                            section="",
+                            key="",
+                            message=f"Could not read ODF from ZIP: {exc}",
+                            source="ZIP archive",
+                            rule_id="read-error",
+                        ))
     except (OSError, zipfile.BadZipFile) as exc:
         return [ODFIssue(
             severity="ERROR",
@@ -388,17 +531,12 @@ def validate_zip(
             rule_id="archive-error",
         )]
 
-    # Recompute from all archive names, including ODFs not selected for detailed
-    # validation, so sibling dependencies still resolve.
-    available = set(name.lower() for name in known_odfs)
-    with zipfile.ZipFile(archive, "r") as zf:
-        available.update(
-            Path(info.filename).name.lower()
-            for info in zf.infolist()
-            if not info.is_dir() and Path(info.filename).suffix.lower() == ".odf"
-        )
-    for doc in documents:
-        issues.extend(validate_document(doc, available))
+    if wanted is None:
+        selected = all_documents
+    else:
+        selected = [doc for doc in all_documents if doc.path.name.lower() in wanted]
+
+    issues.extend(_validate_document_set(all_documents, selected, known_odfs))
     return _sort_issues(issues)
 
 
