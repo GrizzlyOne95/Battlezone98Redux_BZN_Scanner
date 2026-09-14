@@ -1,7 +1,7 @@
 """Battlezone 98 Redux ODF validation.
 
 The validator is intentionally conservative: it reports loader mismatches and
-known crash-risk omissions without rewriting user files.  Rules in this module
+known crash-risk omissions without rewriting user files. Rules in this module
 should be backed by stock ODFs, source/decomp loader behavior, or a reproducible
 runtime failure.
 """
@@ -41,51 +41,19 @@ class ODFDocument:
             out[key.lower()] = (value, line)
         return out
 
+    def value(self, section: str, key: str, default: str = "") -> str:
+        return self.keys(section).get(key.lower(), (default, 0))[0]
 
-# Canonical section names exercised by the initial rule pack.  This is not yet
-# the complete Redux loader schema; it is deliberately evidence-driven.
-CANONICAL_SECTIONS = {
-    "gameobjectclass": "GameObjectClass",
-    "ordnanceclass": "OrdnanceClass",
-    "weaponclass": "WeaponClass",
-    "mineclass": "MineClass",
-    "flaremineclass": "FlareMineClass",
-    "magnetmineclass": "MagnetMineClass",
-    "scavengerclass": "ScavengerClass",
-    "flamepuffclass": "FlamePuffClass",
-    "craftclass": "CraftClass",
-    "hovercraftclass": "HoverCraftClass",
-    "buildingclass": "BuildingClass",
-}
+    def class_label(self) -> str:
+        for section in ("GameObjectClass", "GameObject", "OrdnanceClass", "WeaponClass"):
+            value = self.value(section, "classLabel")
+            if value:
+                return _unquote(value).lower()
+        return ""
 
-# Known historical/legacy labels that Redux silently ignores for these loaders.
-SECTION_RENAMES = {
-    "gameobject": "GameObjectClass",
-    "flarebuildingclass": "FlareMineClass",
-    "magnetclass": "MagnetMineClass",
-    "scavengercraftclass": "ScavengerClass",
-    "flameclass": "FlamePuffClass",
-}
 
-# Keys whose spelling is known to matter in Redux loaders.  Lookup is case
-# insensitive for validation because historical ODFs use inconsistent casing;
-# this catches actual spelling changes rather than stylistic case differences.
-KEY_RENAMES = {
-    ("MagnetMineClass", "triggetdelay"): "triggerDelay",
-}
-
-FLAME_PUFF_KEYS = {
-    "flameradius": "flameRadius",
-    "flamedelay": "flameDelay",
-    "flametexture": "flameTexture",
-    "flameframes": "flameFrames",
-}
-
-FLAME_LEGACY_KEYS = {
-    "flamelength": "flameLength",
-    "variance": "variance",
-    "shotcolor": "shotColor",
-}
+def _unquote(value: str) -> str:
+    return value.strip().strip('"').strip("'")
 
 
 def parse_odf(path: Path) -> ODFDocument:
@@ -139,100 +107,133 @@ def _issue(severity: str, doc: ODFDocument, section: str, key: str, message: str
     )
 
 
+def _section_issue(doc: ODFDocument, old: str, new: str, *, critical: bool = False,
+                   source: str = "Redux loader section name") -> ODFIssue:
+    severity = "CRITICAL" if critical else "ERROR"
+    if critical:
+        message = (
+            f"Redux expects [{new}], not [{old}]. Ignoring this section can leave the "
+            "flare payload OrdnanceClass pointer null and crash FlareMine::Update()."
+        )
+    else:
+        message = f"Redux expects [{new}], not [{old}]; [{old}] is silently ignored by this loader path."
+    return _issue(severity, doc, old, "", message, f"Rename [{old}] to [{new}].", source)
+
+
 def validate_document(doc: ODFDocument, available_odfs: Iterable[str] = ()) -> List[ODFIssue]:
     issues: List[ODFIssue] = []
     available = {name.lower() for name in available_odfs}
+    label = doc.class_label()
 
-    # Section-loader mismatches.  These are high signal because Redux matches
-    # loader section hashes; an unrecognized section is simply never consumed.
-    for lower, original in doc.original_sections.items():
-        replacement = SECTION_RENAMES.get(lower)
-        if replacement:
-            severity = "ERROR"
-            message = f"Redux does not use [{original}] for this class; the section is silently ignored."
-            source = "Redux loader section name"
-            if replacement == "FlareMineClass":
-                severity = "CRITICAL"
-                message = (
-                    f"Redux expects [{replacement}], not [{original}]. Ignoring this section can leave "
-                    "the flare payload OrdnanceClass pointer null and crash FlareMine::Update()."
-                )
-                source = "FlareMineClass::Load / FlareMine::Update runtime crash trace"
+    # GameObject is an old section label; Redux object-class data is loaded from
+    # GameObjectClass. This is what causes an otherwise populated object to reach
+    # class creation with no usable classLabel.
+    if doc.has_section("GameObject"):
+        issues.append(_section_issue(doc, doc.original_sections["gameobject"], "GameObjectClass"))
+        game_keys = doc.keys("GameObject")
+        if "basename" in game_keys:
             issues.append(_issue(
-                severity, doc, original, "", message,
-                f"Rename [{original}] to [{replacement}].", source,
+                "WARNING", doc, doc.original_sections["gameobject"], "basename",
+                "Use Redux's canonical baseName spelling when migrating this GameObject section.",
+                "Rename the key to 'baseName' while converting the section to [GameObjectClass].",
+                "Redux GameObjectClass loader / stock ODF contract",
             ))
 
-    # Validate known misspelled keys against the section Redux actually wants.
-    for lower, original in doc.original_sections.items():
-        effective_section = SECTION_RENAMES.get(lower, CANONICAL_SECTIONS.get(lower, original))
-        keys = doc.keys(original)
-        for key_lower in keys:
-            replacement = KEY_RENAMES.get((effective_section, key_lower))
-            if replacement:
+    # The fatal AbsoZero case. Redux loads flare-specific data from
+    # FlareMineClass; FlareBuildingClass is never consumed. If payloadName never
+    # reaches the class object, FlareMine::Update dereferences a null payload.
+    if label == "flare" and doc.has_section("FlareBuildingClass"):
+        issues.append(_section_issue(
+            doc, doc.original_sections["flarebuildingclass"], "FlareMineClass",
+            critical=True,
+            source="FlareMineClass::Load / FlareMine::Update runtime crash trace",
+        ))
+
+    # MagnetClass also exists on non-mine objects, so only reinterpret it when
+    # the ODF is the mine/ordnance path (OrdnanceClass + MineClass + magnet).
+    magnet_mine = (
+        label == "magnet"
+        and doc.has_section("OrdnanceClass")
+        and doc.has_section("MineClass")
+    )
+    if magnet_mine and doc.has_section("MagnetClass"):
+        old = doc.original_sections["magnetclass"]
+        issues.append(_section_issue(doc, old, "MagnetMineClass"))
+        if "triggetdelay" in doc.keys("MagnetClass"):
+            issues.append(_issue(
+                "ERROR", doc, old, "triggetDelay",
+                "'triggetDelay' is not read by the Redux MagnetMineClass loader.",
+                "Use 'triggerDelay'.", "Redux MagnetMineClass loader key spelling",
+            ))
+    elif magnet_mine and doc.has_section("MagnetMineClass"):
+        if "triggetdelay" in doc.keys("MagnetMineClass"):
+            issues.append(_issue(
+                "ERROR", doc, "MagnetMineClass", "triggetDelay",
+                "'triggetDelay' is not read by the Redux MagnetMineClass loader.",
+                "Use 'triggerDelay'.", "Redux MagnetMineClass loader key spelling",
+            ))
+
+    # ScavengerCraftClass is the legacy name used by this mission; Redux's
+    # scavenger-specific loader section is ScavengerClass.
+    if label == "scavenger" and doc.has_section("ScavengerCraftClass"):
+        issues.append(_section_issue(
+            doc, doc.original_sections["scavengercraftclass"], "ScavengerClass"
+        ))
+
+    # flameClass is not universally a FlamePuffClass alias (switcher ODFs may
+    # carry their own legacy flame data), so only apply this rule to flamepuff.
+    flame_puff = label == "flamepuff" and doc.has_section("OrdnanceClass")
+    if flame_puff and doc.has_section("flameClass"):
+        old = doc.original_sections["flameclass"]
+        issues.append(_section_issue(doc, old, "FlamePuffClass"))
+        flame_section = old
+    elif flame_puff and doc.has_section("FlamePuffClass"):
+        flame_section = "FlamePuffClass"
+    else:
+        flame_section = None
+
+    if flame_section:
+        keys = doc.keys(flame_section)
+        for legacy in ("flamelength", "variance", "shotcolor"):
+            if legacy in keys:
                 issues.append(_issue(
-                    "ERROR", doc, original, key_lower,
-                    f"'{key_lower}' is not read by the Redux {effective_section} loader.",
-                    f"Use '{replacement}'.", "Redux loader key spelling",
+                    "WARNING", doc, flame_section, legacy,
+                    f"'{legacy}' is a legacy flame field and is not part of the Redux FlamePuffClass key set.",
+                    "Use flameRadius/flameDelay/flameTexture/flameFrames as appropriate.",
+                    "Redux FlamePuffClass loader / stock flame ODF contract",
                 ))
 
-    # FlareMine payload is dereferenced by runtime update code.  Report a
-    # missing payload even when the section itself is otherwise valid.
-    flare_sections = []
+    # FlareMine payload is dereferenced by runtime update code. Report a missing
+    # payload on the actual Redux section, and validate any named payload against
+    # the combined local + known-stock namespace supplied by the caller.
     if doc.has_section("FlareMineClass"):
-        flare_sections.append("FlareMineClass")
-    if doc.has_section("FlareBuildingClass"):
-        # Still inspect it so the error can explain why the apparent payload is
-        # not sufficient.
-        flare_sections.append("FlareBuildingClass")
-    for section in flare_sections:
-        keys = doc.keys(section)
-        payload = keys.get("payloadname", ("", 0))[0].strip().strip('"').strip("'")
-        if section == "FlareMineClass" and not payload:
+        payload = _unquote(doc.value("FlareMineClass", "payloadName"))
+        if not payload:
             issues.append(_issue(
-                "CRITICAL", doc, section, "payloadName",
+                "CRITICAL", doc, "FlareMineClass", "payloadName",
                 "FlareMineClass has no payloadName; runtime flare update can dereference a null payload class.",
                 "Set payloadName to a valid ordnance ODF base name.",
                 "FlareMineClass::Load / FlareMine::Update runtime crash trace",
             ))
-        if payload and available:
+        elif available:
             target = payload.lower()
             if not target.endswith(".odf"):
                 target += ".odf"
             if target not in available:
                 issues.append(_issue(
-                    "ERROR", doc, section, "payloadName",
-                    f"Referenced payload '{payload}' was not found in the scanned directory.",
+                    "ERROR", doc, "FlareMineClass", "payloadName",
+                    f"Referenced payload '{payload}' was not found in the scanned local/stock ODF namespace.",
                     "Add the referenced ODF or correct payloadName.", "ODF dependency check",
                 ))
 
-    # Flame puff loader migration: old [flameClass] sections and several old
-    # fields are accepted by neither the Redux FlamePuffClass loader nor its
-    # stock ODF contract.
-    flame_section = None
-    if doc.has_section("FlamePuffClass"):
-        flame_section = "FlamePuffClass"
-    elif doc.has_section("flameClass"):
-        flame_section = "flameClass"
-    if flame_section:
-        keys = doc.keys(flame_section)
-        for legacy in FLAME_LEGACY_KEYS:
-            if legacy in keys:
-                issues.append(_issue(
-                    "WARNING", doc, flame_section, legacy,
-                    f"'{legacy}' is a legacy flame field and is not part of the Redux FlamePuffClass key set.",
-                    "Use the Redux flameRadius/flameDelay/flameTexture/flameFrames model as appropriate.",
-                    "Redux FlamePuffClass loader / stock flame ODFs",
-                ))
-
-    # Catch the exact historical typo from AbsoZero.  Generic dependency
-    # extraction cannot infer arbitrary resource types, so start with the
-    # explosion keys that are known ODF references.
+    # Explosion keys are ODF references. Checking them against local files plus
+    # the stock ODF set catches misspellings such as xmlasbld -> xlasbld while
+    # avoiding false positives for ordinary stock explosion assets.
     ord_keys = doc.keys("OrdnanceClass") if doc.has_section("OrdnanceClass") else {}
     for key in ("xplground", "xplvehicle", "xplbuilding"):
         if key not in ord_keys:
             continue
-        value = ord_keys[key][0].strip().strip('"').strip("'")
+        value = _unquote(ord_keys[key][0])
         if not value or not available:
             continue
         target = value.lower()
@@ -240,21 +241,22 @@ def validate_document(doc: ODFDocument, available_odfs: Iterable[str] = ()) -> L
             target += ".odf"
         if target in available:
             continue
-        # Stock names are not necessarily in the mission directory, but a very
-        # close local/known name is useful enough to suggest without rewriting.
-        candidates = sorted(available)
-        close = get_close_matches(target, candidates, n=1, cutoff=0.80)
+        close = get_close_matches(target, sorted(available), n=1, cutoff=0.78)
         suggestion = f"Did you mean '{close[0]}'?" if close else "Verify the explosion ODF name."
         issues.append(_issue(
             "WARNING", doc, "OrdnanceClass", key,
-            f"Referenced explosion ODF '{value}' was not found in the scanned directory.",
+            f"Referenced explosion ODF '{value}' was not found in the scanned local/stock ODF namespace.",
             suggestion, "OrdnanceClass explosion dependency",
         ))
 
     return issues
 
 
-def validate_directory(directory: str | Path, filenames: Sequence[str] | None = None) -> List[ODFIssue]:
+def validate_directory(
+    directory: str | Path,
+    filenames: Sequence[str] | None = None,
+    known_odfs: Iterable[str] = (),
+) -> List[ODFIssue]:
     root = Path(directory)
     if filenames is None:
         paths = sorted(root.glob("*.odf"), key=lambda p: p.name.lower())
@@ -264,6 +266,8 @@ def validate_directory(directory: str | Path, filenames: Sequence[str] | None = 
         paths.sort(key=lambda p: p.name.lower())
 
     available = {p.name.lower() for p in root.glob("*.odf")}
+    available.update(name.lower() for name in known_odfs)
+
     issues: List[ODFIssue] = []
     for path in paths:
         try:
