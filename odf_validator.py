@@ -1,9 +1,9 @@
 """Battlezone 98 Redux ODF validation.
 
 The validator is intentionally conservative: it reports loader mismatches and
-known crash-risk omissions without rewriting user files. Rules in this module
-should be backed by stock ODFs, source/decomp loader behavior, or a reproducible
-runtime failure.
+known crash-risk omissions without rewriting user files. The rule data lives in
+odf_schema.py so the checker can grow toward a codebase-derived schema instead
+of accumulating one-off conditionals.
 """
 
 from __future__ import annotations
@@ -13,6 +13,9 @@ from difflib import get_close_matches
 from pathlib import Path
 import re
 from typing import Dict, Iterable, List, Mapping, Sequence, Tuple
+import zipfile
+
+from odf_schema import LOADER_RULES, REFERENCE_KEYS, LoaderRule
 
 
 @dataclass(frozen=True)
@@ -24,6 +27,8 @@ class ODFIssue:
     message: str
     suggestion: str = ""
     source: str = ""
+    rule_id: str = ""
+    line: int = 0
 
 
 @dataclass
@@ -35,14 +40,17 @@ class ODFDocument:
     def has_section(self, name: str) -> bool:
         return name.lower() in self.sections
 
-    def keys(self, section: str) -> Mapping[str, Tuple[str, int]]:
-        out: Dict[str, Tuple[str, int]] = {}
+    def entries(self, section: str) -> List[Tuple[str, str, int]]:
+        return list(self.sections.get(section.lower(), ()))
+
+    def keys(self, section: str) -> Mapping[str, Tuple[str, int, str]]:
+        out: Dict[str, Tuple[str, int, str]] = {}
         for key, value, line in self.sections.get(section.lower(), []):
-            out[key.lower()] = (value, line)
+            out[key.lower()] = (value, line, key)
         return out
 
     def value(self, section: str, key: str, default: str = "") -> str:
-        return self.keys(section).get(key.lower(), (default, 0))[0]
+        return self.keys(section).get(key.lower(), (default, 0, key))[0]
 
     def class_label(self) -> str:
         for section in ("GameObjectClass", "GameObject", "OrdnanceClass", "WeaponClass"):
@@ -56,13 +64,9 @@ def _unquote(value: str) -> str:
     return value.strip().strip('"').strip("'")
 
 
-def parse_odf(path: Path) -> ODFDocument:
-    """Parse an ODF as a permissive INI-like file while preserving duplicates."""
-    raw = path.read_bytes()
-    # ODFs are legacy ASCII/ANSI files. latin-1 is lossless for byte values and
-    # avoids rejecting old community files that are not valid UTF-8.
-    text = raw.decode("latin-1")
-
+def parse_odf_bytes(data: bytes, virtual_path: str | Path) -> ODFDocument:
+    """Parse an ODF byte stream as permissive legacy INI text."""
+    text = data.decode("latin-1")
     sections: Dict[str, List[Tuple[str, str, int]]] = {}
     original_sections: Dict[str, str] = {}
     current: str | None = None
@@ -91,11 +95,24 @@ def parse_odf(path: Path) -> ODFDocument:
         value = match.group(2).strip()
         sections[current].append((key, value, line_no))
 
-    return ODFDocument(path=path, sections=sections, original_sections=original_sections)
+    return ODFDocument(path=Path(virtual_path), sections=sections, original_sections=original_sections)
 
 
-def _issue(severity: str, doc: ODFDocument, section: str, key: str, message: str,
-           suggestion: str = "", source: str = "") -> ODFIssue:
+def parse_odf(path: Path) -> ODFDocument:
+    return parse_odf_bytes(path.read_bytes(), path)
+
+
+def _issue(
+    severity: str,
+    doc: ODFDocument,
+    section: str,
+    key: str,
+    message: str,
+    suggestion: str = "",
+    source: str = "",
+    rule_id: str = "",
+    line: int = 0,
+) -> ODFIssue:
     return ODFIssue(
         severity=severity,
         filename=doc.path.name,
@@ -104,152 +121,185 @@ def _issue(severity: str, doc: ODFDocument, section: str, key: str, message: str
         message=message,
         suggestion=suggestion,
         source=source,
+        rule_id=rule_id,
+        line=line,
     )
 
 
-def _section_issue(doc: ODFDocument, old: str, new: str, *, critical: bool = False,
-                   source: str = "Redux loader section name") -> ODFIssue:
-    severity = "CRITICAL" if critical else "ERROR"
-    if critical:
-        message = (
-            f"Redux expects [{new}], not [{old}]. Ignoring this section can leave the "
-            "flare payload OrdnanceClass pointer null and crash FlareMine::Update()."
-        )
-    else:
-        message = f"Redux expects [{new}], not [{old}]; [{old}] is silently ignored by this loader path."
-    return _issue(severity, doc, old, "", message, f"Rename [{old}] to [{new}].", source)
+def _rule_matches(doc: ODFDocument, rule: LoaderRule) -> bool:
+    if rule.class_labels and doc.class_label() not in {label.lower() for label in rule.class_labels}:
+        return False
+    return all(doc.has_section(section) for section in rule.required_sections)
+
+
+def _active_rule_section(doc: ODFDocument, rule: LoaderRule) -> tuple[str | None, bool]:
+    """Return (section name, is_legacy) for the first present section in a rule."""
+    if doc.has_section(rule.expected_section):
+        return rule.expected_section, False
+    for legacy in rule.legacy_sections:
+        if doc.has_section(legacy):
+            return doc.original_sections.get(legacy.lower(), legacy), True
+    return None, False
+
+
+def _validate_loader_rules(doc: ODFDocument) -> List[ODFIssue]:
+    issues: List[ODFIssue] = []
+
+    for rule in LOADER_RULES:
+        if not _rule_matches(doc, rule):
+            continue
+
+        section, is_legacy = _active_rule_section(doc, rule)
+        if section is None:
+            # Absence alone is not an error yet: ODF inheritance may supply the
+            # class-specific section from baseName. Until inheritance resolution
+            # is implemented, only diagnose a canonical or known-legacy section
+            # that is actually present in this file.
+            continue
+
+        if is_legacy:
+            issues.append(_issue(
+                rule.section_severity,
+                doc,
+                section,
+                "",
+                rule.section_message,
+                f"Rename [{section}] to [{rule.expected_section}].",
+                rule.source,
+                rule.rule_id,
+            ))
+
+        keys = doc.keys(section)
+
+        for alias in rule.key_aliases:
+            if alias.legacy_only and not is_legacy:
+                continue
+            entry = keys.get(alias.legacy.lower())
+            if not entry:
+                continue
+            _value, line, original_key = entry
+            # If the alias differs only by case, only flag the exact legacy
+            # spelling encoded in the schema; this avoids inventing case rules.
+            if original_key != alias.legacy:
+                continue
+            issues.append(_issue(
+                alias.severity,
+                doc,
+                section,
+                original_key,
+                alias.message or f"'{original_key}' is not the Redux loader key spelling.",
+                f"Use '{alias.canonical}'.",
+                rule.source,
+                rule.rule_id,
+                line,
+            ))
+
+        # Required keys are enforced on the canonical loader section. A legacy
+        # section may contain the key text, but Redux will not load it.
+        if not is_legacy:
+            canonical_keys = doc.keys(rule.expected_section)
+            for required in rule.required_keys:
+                if required.name.lower() not in canonical_keys or not _unquote(canonical_keys[required.name.lower()][0]):
+                    issues.append(_issue(
+                        required.severity,
+                        doc,
+                        rule.expected_section,
+                        required.name,
+                        required.message,
+                        required.suggestion,
+                        rule.source,
+                        rule.rule_id,
+                    ))
+
+        for legacy_key in rule.legacy_keys:
+            entry = keys.get(legacy_key.name.lower())
+            if not entry:
+                continue
+            _value, line, original_key = entry
+            issues.append(_issue(
+                legacy_key.severity,
+                doc,
+                section,
+                original_key,
+                legacy_key.message,
+                legacy_key.suggestion,
+                rule.source,
+                rule.rule_id,
+                line,
+            ))
+
+    return issues
+
+
+def _validate_references(doc: ODFDocument, available: set[str]) -> List[ODFIssue]:
+    issues: List[ODFIssue] = []
+    if not available:
+        return issues
+
+    for section, keyspec in REFERENCE_KEYS.items():
+        if not doc.has_section(section):
+            continue
+        keys = doc.keys(section)
+        for canonical_key, severity in keyspec.items():
+            entry = keys.get(canonical_key.lower())
+            if not entry:
+                continue
+            value, line, original_key = entry
+            reference = _unquote(value)
+            if not reference or reference.lower() in {"null", "none"}:
+                continue
+            target = reference.lower()
+            if not target.endswith(".odf"):
+                target += ".odf"
+            if target in available:
+                continue
+
+            close = get_close_matches(target, sorted(available), n=1, cutoff=0.78)
+            suggestion = f"Did you mean '{close[0]}'?" if close else "Add the referenced ODF or correct the name."
+            label = "payload" if section.lower() == "flaremineclass" else "ODF"
+            issues.append(_issue(
+                severity,
+                doc,
+                section,
+                original_key,
+                f"Referenced {label} '{reference}' was not found in the scanned local/stock ODF namespace.",
+                suggestion,
+                f"{section} ODF dependency",
+                "reference-check",
+                line,
+            ))
+
+    return issues
 
 
 def validate_document(doc: ODFDocument, available_odfs: Iterable[str] = ()) -> List[ODFIssue]:
-    issues: List[ODFIssue] = []
     available = {name.lower() for name in available_odfs}
-    label = doc.class_label()
-
-    # GameObject is an old section label; Redux object-class data is loaded from
-    # GameObjectClass. This is what causes an otherwise populated object to reach
-    # class creation with no usable classLabel.
-    if doc.has_section("GameObject"):
-        issues.append(_section_issue(doc, doc.original_sections["gameobject"], "GameObjectClass"))
-        game_keys = doc.keys("GameObject")
-        if "basename" in game_keys:
-            issues.append(_issue(
-                "WARNING", doc, doc.original_sections["gameobject"], "basename",
-                "Use Redux's canonical baseName spelling when migrating this GameObject section.",
-                "Rename the key to 'baseName' while converting the section to [GameObjectClass].",
-                "Redux GameObjectClass loader / stock ODF contract",
-            ))
-
-    # The fatal AbsoZero case. Redux loads flare-specific data from
-    # FlareMineClass; FlareBuildingClass is never consumed. If payloadName never
-    # reaches the class object, FlareMine::Update dereferences a null payload.
-    if label == "flare" and doc.has_section("FlareBuildingClass"):
-        issues.append(_section_issue(
-            doc, doc.original_sections["flarebuildingclass"], "FlareMineClass",
-            critical=True,
-            source="FlareMineClass::Load / FlareMine::Update runtime crash trace",
-        ))
-
-    # MagnetClass also exists on non-mine objects, so only reinterpret it when
-    # the ODF is the mine/ordnance path (OrdnanceClass + MineClass + magnet).
-    magnet_mine = (
-        label == "magnet"
-        and doc.has_section("OrdnanceClass")
-        and doc.has_section("MineClass")
-    )
-    if magnet_mine and doc.has_section("MagnetClass"):
-        old = doc.original_sections["magnetclass"]
-        issues.append(_section_issue(doc, old, "MagnetMineClass"))
-        if "triggetdelay" in doc.keys("MagnetClass"):
-            issues.append(_issue(
-                "ERROR", doc, old, "triggetDelay",
-                "'triggetDelay' is not read by the Redux MagnetMineClass loader.",
-                "Use 'triggerDelay'.", "Redux MagnetMineClass loader key spelling",
-            ))
-    elif magnet_mine and doc.has_section("MagnetMineClass"):
-        if "triggetdelay" in doc.keys("MagnetMineClass"):
-            issues.append(_issue(
-                "ERROR", doc, "MagnetMineClass", "triggetDelay",
-                "'triggetDelay' is not read by the Redux MagnetMineClass loader.",
-                "Use 'triggerDelay'.", "Redux MagnetMineClass loader key spelling",
-            ))
-
-    # ScavengerCraftClass is the legacy name used by this mission; Redux's
-    # scavenger-specific loader section is ScavengerClass.
-    if label == "scavenger" and doc.has_section("ScavengerCraftClass"):
-        issues.append(_section_issue(
-            doc, doc.original_sections["scavengercraftclass"], "ScavengerClass"
-        ))
-
-    # flameClass is not universally a FlamePuffClass alias (switcher ODFs may
-    # carry their own legacy flame data), so only apply this rule to flamepuff.
-    flame_puff = label == "flamepuff" and doc.has_section("OrdnanceClass")
-    if flame_puff and doc.has_section("flameClass"):
-        old = doc.original_sections["flameclass"]
-        issues.append(_section_issue(doc, old, "FlamePuffClass"))
-        flame_section = old
-    elif flame_puff and doc.has_section("FlamePuffClass"):
-        flame_section = "FlamePuffClass"
-    else:
-        flame_section = None
-
-    if flame_section:
-        keys = doc.keys(flame_section)
-        for legacy in ("flamelength", "variance", "shotcolor"):
-            if legacy in keys:
-                issues.append(_issue(
-                    "WARNING", doc, flame_section, legacy,
-                    f"'{legacy}' is a legacy flame field and is not part of the Redux FlamePuffClass key set.",
-                    "Use flameRadius/flameDelay/flameTexture/flameFrames as appropriate.",
-                    "Redux FlamePuffClass loader / stock flame ODF contract",
-                ))
-
-    # FlareMine payload is dereferenced by runtime update code. Report a missing
-    # payload on the actual Redux section, and validate any named payload against
-    # the combined local + known-stock namespace supplied by the caller.
-    if doc.has_section("FlareMineClass"):
-        payload = _unquote(doc.value("FlareMineClass", "payloadName"))
-        if not payload:
-            issues.append(_issue(
-                "CRITICAL", doc, "FlareMineClass", "payloadName",
-                "FlareMineClass has no payloadName; runtime flare update can dereference a null payload class.",
-                "Set payloadName to a valid ordnance ODF base name.",
-                "FlareMineClass::Load / FlareMine::Update runtime crash trace",
-            ))
-        elif available:
-            target = payload.lower()
-            if not target.endswith(".odf"):
-                target += ".odf"
-            if target not in available:
-                issues.append(_issue(
-                    "ERROR", doc, "FlareMineClass", "payloadName",
-                    f"Referenced payload '{payload}' was not found in the scanned local/stock ODF namespace.",
-                    "Add the referenced ODF or correct payloadName.", "ODF dependency check",
-                ))
-
-    # Explosion keys are ODF references. Checking them against local files plus
-    # the stock ODF set catches misspellings such as xmlasbld -> xlasbld while
-    # avoiding false positives for ordinary stock explosion assets.
-    ord_keys = doc.keys("OrdnanceClass") if doc.has_section("OrdnanceClass") else {}
-    for key in ("xplground", "xplvehicle", "xplbuilding"):
-        if key not in ord_keys:
-            continue
-        value = _unquote(ord_keys[key][0])
-        if not value or not available:
-            continue
-        target = value.lower()
-        if not target.endswith(".odf"):
-            target += ".odf"
-        if target in available:
-            continue
-        close = get_close_matches(target, sorted(available), n=1, cutoff=0.78)
-        suggestion = f"Did you mean '{close[0]}'?" if close else "Verify the explosion ODF name."
-        issues.append(_issue(
-            "WARNING", doc, "OrdnanceClass", key,
-            f"Referenced explosion ODF '{value}' was not found in the scanned local/stock ODF namespace.",
-            suggestion, "OrdnanceClass explosion dependency",
-        ))
-
+    issues = _validate_loader_rules(doc)
+    issues.extend(_validate_references(doc, available))
     return issues
+
+
+def _sort_issues(issues: List[ODFIssue]) -> List[ODFIssue]:
+    order = {"CRITICAL": 0, "ERROR": 1, "WARNING": 2, "INFO": 3}
+    issues.sort(
+        key=lambda x: (
+            order.get(x.severity, 99),
+            x.filename.lower(),
+            x.line or 1_000_000,
+            x.section.lower(),
+            x.key.lower(),
+        )
+    )
+    return issues
+
+
+def validate_documents(documents: Sequence[ODFDocument], known_odfs: Iterable[str] = ()) -> List[ODFIssue]:
+    available = {doc.path.name.lower() for doc in documents}
+    available.update(name.lower() for name in known_odfs)
+    issues: List[ODFIssue] = []
+    for doc in documents:
+        issues.extend(validate_document(doc, available))
+    return _sort_issues(issues)
 
 
 def validate_directory(
@@ -258,27 +308,146 @@ def validate_directory(
     known_odfs: Iterable[str] = (),
 ) -> List[ODFIssue]:
     root = Path(directory)
-    if filenames is None:
-        paths = sorted(root.glob("*.odf"), key=lambda p: p.name.lower())
-    else:
-        wanted = {name.lower() for name in filenames}
-        paths = [p for p in root.glob("*.odf") if p.name.lower() in wanted]
-        paths.sort(key=lambda p: p.name.lower())
+    paths = [p for p in root.iterdir() if p.is_file() and p.suffix.lower() == ".odf"]
+    if filenames is not None:
+        wanted = {Path(name).name.lower() for name in filenames}
+        paths = [p for p in paths if p.name.lower() in wanted]
+    paths.sort(key=lambda p: p.name.lower())
 
-    available = {p.name.lower() for p in root.glob("*.odf")}
-    available.update(name.lower() for name in known_odfs)
-
+    documents: List[ODFDocument] = []
     issues: List[ODFIssue] = []
     for path in paths:
         try:
-            doc = parse_odf(path)
-            issues.extend(validate_document(doc, available))
+            documents.append(parse_odf(path))
         except OSError as exc:
             issues.append(ODFIssue(
-                severity="ERROR", filename=path.name, section="", key="",
-                message=f"Could not read ODF: {exc}", source="filesystem",
+                severity="ERROR",
+                filename=path.name,
+                section="",
+                key="",
+                message=f"Could not read ODF: {exc}",
+                source="filesystem",
+                rule_id="read-error",
             ))
 
-    order = {"CRITICAL": 0, "ERROR": 1, "WARNING": 2, "INFO": 3}
-    issues.sort(key=lambda x: (order.get(x.severity, 99), x.filename.lower(), x.section.lower(), x.key.lower()))
-    return issues
+    available = {p.name.lower() for p in paths}
+    # The available namespace should include every local ODF even when only a
+    # subset is being validated, so references can resolve against siblings.
+    try:
+        available.update(p.name.lower() for p in root.iterdir() if p.is_file() and p.suffix.lower() == ".odf")
+    except OSError:
+        pass
+    available.update(name.lower() for name in known_odfs)
+    for doc in documents:
+        issues.extend(validate_document(doc, available))
+    return _sort_issues(issues)
+
+
+def validate_zip(
+    archive: str | Path,
+    filenames: Sequence[str] | None = None,
+    known_odfs: Iterable[str] = (),
+) -> List[ODFIssue]:
+    """Validate ODFs directly inside a ZIP without extracting files to disk."""
+    wanted = None if filenames is None else {Path(name).name.lower() for name in filenames}
+    documents: List[ODFDocument] = []
+    issues: List[ODFIssue] = []
+
+    try:
+        with zipfile.ZipFile(archive, "r") as zf:
+            odf_infos = [
+                info for info in zf.infolist()
+                if not info.is_dir() and Path(info.filename).suffix.lower() == ".odf"
+            ]
+            available = {Path(info.filename).name.lower() for info in odf_infos}
+            available.update(name.lower() for name in known_odfs)
+            for info in odf_infos:
+                name = Path(info.filename).name
+                if wanted is not None and name.lower() not in wanted:
+                    continue
+                try:
+                    documents.append(parse_odf_bytes(zf.read(info), info.filename))
+                except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+                    issues.append(ODFIssue(
+                        severity="ERROR",
+                        filename=name,
+                        section="",
+                        key="",
+                        message=f"Could not read ODF from ZIP: {exc}",
+                        source="ZIP archive",
+                        rule_id="read-error",
+                    ))
+    except (OSError, zipfile.BadZipFile) as exc:
+        return [ODFIssue(
+            severity="ERROR",
+            filename=Path(archive).name,
+            section="",
+            key="",
+            message=f"Could not open ZIP: {exc}",
+            source="ZIP archive",
+            rule_id="archive-error",
+        )]
+
+    # Recompute from all archive names, including ODFs not selected for detailed
+    # validation, so sibling dependencies still resolve.
+    available = set(name.lower() for name in known_odfs)
+    with zipfile.ZipFile(archive, "r") as zf:
+        available.update(
+            Path(info.filename).name.lower()
+            for info in zf.infolist()
+            if not info.is_dir() and Path(info.filename).suffix.lower() == ".odf"
+        )
+    for doc in documents:
+        issues.extend(validate_document(doc, available))
+    return _sort_issues(issues)
+
+
+def _cli_main() -> int:
+    import argparse
+    import json
+    from dataclasses import asdict
+
+    parser = argparse.ArgumentParser(description="Validate Battlezone 98 Redux ODF files")
+    parser.add_argument("path", help="ODF file, folder, or ZIP archive to validate")
+    parser.add_argument("--json", action="store_true", dest="as_json", help="Emit JSON findings")
+    args = parser.parse_args()
+
+    try:
+        from bzn_scan import STOCK_SET
+        known = STOCK_SET
+    except Exception:
+        known = ()
+
+    target = Path(args.path)
+    if target.is_dir():
+        issues = validate_directory(target, known_odfs=known)
+    elif target.suffix.lower() == ".zip":
+        issues = validate_zip(target, known_odfs=known)
+    elif target.suffix.lower() == ".odf" and target.is_file():
+        issues = validate_directory(target.parent, filenames=[target.name], known_odfs=known)
+    else:
+        parser.error("path must be an ODF file, directory, or ZIP archive")
+
+    if args.as_json:
+        print(json.dumps([asdict(issue) for issue in issues], indent=2))
+    else:
+        for issue in issues:
+            location = issue.section
+            if issue.key:
+                location = f"{location}/{issue.key}" if location else issue.key
+            line = f":{issue.line}" if issue.line else ""
+            print(f"{issue.severity:8} {issue.filename}{line} {location} - {issue.message}")
+            if issue.suggestion:
+                print(f"         fix: {issue.suggestion}")
+        if not issues:
+            print("No ODF validation findings.")
+
+    if any(issue.severity == "CRITICAL" for issue in issues):
+        return 2
+    if any(issue.severity == "ERROR" for issue in issues):
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_cli_main())
