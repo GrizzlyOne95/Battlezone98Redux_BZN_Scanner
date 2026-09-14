@@ -18,7 +18,7 @@ The current schema is intentionally incomplete. Unknown sections and keys are **
 
 ## Structured provenance
 
-Schema version 4 uses evidence IDs that resolve into `ODFEvidence` records. An evidence record can carry:
+Schema version 5 uses evidence IDs that resolve into `ODFEvidence` records. An evidence record can carry:
 
 - evidence kind,
 - confidence,
@@ -50,6 +50,7 @@ Redux executable addresses and BZ1_Source evidence are separate provenance domai
 | `magnet-mine` | `classLabel=magnet` + `OrdnanceClass` + `MineClass` | `MagnetMineClass` | `MagnetClass` | Error |
 | `scavenger` | `classLabel=scavenger` + `CraftClass` | `ScavengerClass` | `ScavengerCraftClass` | Error |
 | `flame-puff` | `classLabel=flamepuff` + `OrdnanceClass` | `FlamePuffClass` | `flameClass` | Error |
+| `explosion-section` | `classLabel=explosion` + `OrdnanceClass` | `ExplosionClass` | `Explosion` | Error |
 
 Context is important. Similar section names can be used in unrelated legacy content, so the scanner only applies migration rules when the surrounding loader path is proven.
 
@@ -101,6 +102,22 @@ Key spelling is judged only where code evidence identifies the consumed key. Cur
 
 This is why shipped stock files are corroboration rather than absolute truth: stock data can itself contain dead or stale fields.
 
+## Explosion section contract
+
+The mined explosion path exposes a useful distinction between **dispatch** and **section consumption**. `classLabel = "explosion"` can select the explosion ordnance path while the explosion-specific constructor/loader still reads its configuration from `[ExplosionClass]`.
+
+Therefore an ODF like:
+
+```ini
+[OrdnanceClass]
+classLabel = "explosion"
+
+[Explosion]
+damageRadius = 25
+```
+
+is diagnosed because the `[Explosion]` keys are not consumed by the recovered loader. The scanner recommends `[ExplosionClass]` only in the proven `classLabel=explosion` + `OrdnanceClass` context; it does not globally rename arbitrary `[Explosion]` sections.
+
 ## ODF references
 
 The schema currently validates these ODF-valued fields against the combined local + stock filename namespace:
@@ -137,6 +154,7 @@ The test suite verifies:
 - scavenger section naming,
 - flame-puff legacy fields and `frameDelay` spelling,
 - legacy `GameObject` root dispatch,
+- explosion `[Explosion]` vs `[ExplosionClass]` section consumption with a negative control,
 - ODF reference typo detection,
 - ZIP validation without extraction,
 - no fabricated `baseName` ODF merging, cycles, missing-parent, or duplicate-parent diagnostics,
