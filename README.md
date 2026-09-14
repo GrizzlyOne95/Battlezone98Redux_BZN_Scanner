@@ -50,9 +50,10 @@ The current evidence-backed schema covers the failure family exposed by the lega
 - **ERROR/WARNING:** `classLabel = "flamepuff"` using legacy `[flameClass]` and unsupported fields such as `flameLength`, `variance`, and `shotColor`.
 - **WARNING:** `flameDelay` in `[FlamePuffClass]`; recovered code reads `frameDelay` instead.
 - **ERROR:** `classLabel = "explosion"` + `[OrdnanceClass]` using legacy `[Explosion]`; Redux reads explosion-specific fields from `[ExplosionClass]`, so keys under `[Explosion]` are not consumed by that loader.
+- **ERROR:** building ODFs using the exact stock typo `[SprayBuildngClass]`; recovered code reads `[SprayBuildingClass]`, and the typo has no recovered reader. The mining audit found the bad spelling in four stock spray-building ODFs.
 - **WARNING:** missing/misspelled `xplGround`, `xplVehicle`, and `xplBuilding` ODF references, checked against both local and stock ODF names. This catches errors such as `xmlasbld` vs `xlasbld` without flagging valid stock assets as missing.
 
-Rules are intentionally context-sensitive. For example, the scanner does **not** blindly rename every `[MagnetClass]`, `[flameClass]`, or `[Explosion]`; those names are diagnosed only when the surrounding `classLabel` and class sections identify a proven loader path.
+Rules are intentionally context-sensitive. The scanner does **not** blindly rename every similar-looking section: magnet, flame, explosion, and spray-building diagnostics are constrained to the surrounding class/section evidence recovered for those loader paths.
 
 ## Provenance model
 
@@ -62,7 +63,7 @@ Confidence vocabulary:
 
 - `confirmed-code` - behavior directly recovered from loader/decomp code.
 - `code+stock` - code behavior corroborated by stock content or runtime reproduction.
-- `stock-only` - observed in stock content but not yet proven by code.
+- `stock-only` - observed in stock content but not yet code-proven.
 - `inferred` - research lead only; never enough by itself for a hard validator rule.
 
 Redux executable addresses are kept distinct from BZ1_Source corroboration. The scanner does not claim a BZ1_Source file path for a Redux address unless that exact path has been independently verified.
