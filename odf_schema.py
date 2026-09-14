@@ -241,6 +241,20 @@ LOADER_RULES = (
         source="Recovered Redux ExplosionClass loader contract",
         evidence_ids=("redux-explosionclass-contract",),
     ),
+    LoaderRule(
+        rule_id="spray-building-section",
+        expected_section="SprayBuildingClass",
+        legacy_sections=("SprayBuildngClass",),
+        required_sections=("BuildingClass",),
+        section_severity="ERROR",
+        section_message=(
+            "Redux reads spray-building-specific fields from [SprayBuildingClass]. "
+            "The misspelled [SprayBuildngClass] section has no recovered reader, so "
+            "its fields are ignored."
+        ),
+        source="Recovered Redux SprayBuildingClass loader + stock-content audit",
+        evidence_ids=("redux-spraybuilding-contract",),
+    ),
 )
 
 
@@ -260,4 +274,4 @@ REFERENCE_KEYS = {
 }
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
