@@ -11,84 +11,87 @@ jobs:
     strategy:
       matrix:
         os: [windows-latest, ubuntu-latest, macos-latest]
-    
+
     steps:
     - uses: actions/checkout@v4
-    
+
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
         python-version: '3.11'
-    
+
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install pyinstaller
-    
+
+    - name: Run tests
+      run: python -m unittest discover -s tests -v
+
     - name: Build executable (Windows)
       if: runner.os == 'Windows'
       run: |
-        pyinstaller --onefile --windowed --name "bzn_scan" bzn_scan.py
+        pyinstaller --onefile --windowed --name "bzn_scan" scanner_app.py
         move dist\bzn_scan.exe dist\bzn_scan-windows.exe
-    
+
     - name: Build executable (Linux)
       if: runner.os == 'Linux'
       run: |
-        pyinstaller --onefile --name "bzn_scan" bzn_scan.py
+        pyinstaller --onefile --name "bzn_scan" scanner_app.py
         mv dist/bzn_scan dist/bzn_scan-linux
-    
+
     - name: Build executable (macOS)
       if: runner.os == 'macOS'
       run: |
-        pyinstaller --onefile --windowed --name "bzn_scan" bzn_scan.py
+        pyinstaller --onefile --windowed --name "bzn_scan" scanner_app.py
         mv dist/bzn_scan dist/bzn_scan-macos
-    
+
     - name: List build artifacts
       run: |
         echo "Checking dist directory..."
         if [ -d "dist" ]; then ls -la dist/; else echo "dist directory not found"; fi
       shell: bash
-    
+
     - name: Upload artifacts (Windows)
       if: runner.os == 'Windows' && hashFiles('dist/bzn_scan-windows.exe') != ''
       uses: actions/upload-artifact@v4
       with:
         name: bzn_scan-windows
         path: dist/bzn_scan-windows.exe
-    
+
     - name: Upload artifacts (Linux)
       if: runner.os == 'Linux' && hashFiles('dist/bzn_scan-linux') != ''
       uses: actions/upload-artifact@v4
       with:
         name: bzn_scan-linux
         path: dist/bzn_scan-linux
-    
+
     - name: Upload artifacts (macOS)
       if: runner.os == 'macOS' && hashFiles('dist/bzn_scan-macos') != ''
       uses: actions/upload-artifact@v4
       with:
         name: bzn_scan-macos
         path: dist/bzn_scan-macos
-  
+
   release:
     needs: build
     runs-on: ubuntu-latest
     if: success()
     permissions:
       contents: write
-    
+
     steps:
     - uses: actions/checkout@v4
-    
+
     - name: Download all artifacts
       uses: actions/download-artifact@v4
       continue-on-error: true
-    
+
     - name: List artifacts
       run: |
         echo "Artifacts downloaded:"
         find . -type f -name "bzn_scan*" 2>/dev/null || echo "No artifacts found"
-    
+
     - name: Create Release
       uses: softprops/action-gh-release@v1
       with:
