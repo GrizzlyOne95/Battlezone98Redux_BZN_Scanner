@@ -176,6 +176,18 @@ EVIDENCE: Dict[str, ODFEvidence] = {
             "reader. Other legacy-only fields must be judged against the mined key set."
         ),
     ),
+    "redux-explosionclass-contract": ODFEvidence(
+        evidence_id="redux-explosionclass-contract",
+        kind="loader-contract",
+        confidence="confirmed-code",
+        title="Redux ExplosionClass loader contract",
+        detail=(
+            "Recovered explosion construction dispatches the explosion object from "
+            "classLabel=explosion, but explosion-specific fields are read from "
+            "[ExplosionClass]. A legacy [Explosion] section can coexist with the "
+            "dispatch path while its keys remain unread."
+        ),
+    ),
     "odf-reference-resolution": ODFEvidence(
         evidence_id="odf-reference-resolution",
         kind="package-check",
