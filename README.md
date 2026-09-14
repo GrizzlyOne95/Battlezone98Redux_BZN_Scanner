@@ -1,8 +1,16 @@
 # Battlezone98Redux BZN Scanner
 
-A Battlezone 98 Redux mission preflight utility. It scans ASCII or binary `.BZN` files for referenced ODFs, classifies them as stock/custom, checks custom dependencies, and now validates local ODF files against known Redux loader behavior.
+A Battlezone 98 Redux mission preflight utility. It scans ASCII or binary `.BZN` files for referenced ODFs, classifies them as stock/custom, checks custom dependencies, and validates local or packaged ODF files against known Redux loader behavior.
 
 <img width="802" height="632" alt="BZN Scanner" src="https://github.com/user-attachments/assets/5fc44ce6-5d20-45b0-8089-e2d475c86ea7" />
+
+## Scan modes
+
+The integrated GUI now supports three entry points:
+
+- **Load BZN** - scan mission ODF dependencies and validate ODFs beside the BZN.
+- **Scan ODF Folder** - validate every ODF in a mod/work folder without requiring a BZN.
+- **Scan ZIP** - validate ODFs directly inside a packaged ZIP without extracting it first.
 
 ## BZN Dependencies
 
@@ -14,12 +22,14 @@ A Battlezone 98 Redux mission preflight utility. It scans ASCII or binary `.BZN`
 
 ## ODF Validation
 
-Loading a BZN also scans the ODFs in the same directory and opens an **ODF Validation** tab. Validation is read-only: the scanner reports findings and suggested fixes but never rewrites mission files.
+The **ODF Validation** tab is read-only: the scanner reports findings and suggested fixes but never rewrites mission files. Findings include severity, file, line number where available, section/key, stable rule ID, suggested fix, and the evidence/source used for the rule.
 
-The initial evidence-backed rule pack covers the failure family exposed by the legacy **AbsoZero** mission:
+Validation is now driven by `odf_schema.py` rather than hard-coding every special case into the parser. Rules combine `classLabel` with the base class sections present in the ODF, which lets the checker distinguish loader paths that reuse similar legacy names.
+
+The initial evidence-backed schema covers the failure family exposed by the legacy **AbsoZero** mission:
 
 - **CRITICAL:** `classLabel = "flare"` using `[FlareBuildingClass]` instead of Redux `[FlareMineClass]`. This can leave the payload class null and crash `FlareMine::Update()` when the flare fires.
-- **CRITICAL:** `[FlareMineClass]` with no `payloadName`.
+- **CRITICAL:** canonical `[FlareMineClass]` with no `payloadName`.
 - **ERROR:** legacy `[GameObject]` where Redux expects `[GameObjectClass]`, with migration guidance for canonical `baseName`.
 - **ERROR:** magnet mine/ordnance ODFs using `[MagnetClass]` instead of `[MagnetMineClass]`.
 - **ERROR:** magnet mine `triggetDelay` typo instead of `triggerDelay`.
@@ -27,7 +37,22 @@ The initial evidence-backed rule pack covers the failure family exposed by the l
 - **ERROR/WARNING:** `classLabel = "flamepuff"` using legacy `[flameClass]` and fields such as `flameLength`, `variance`, and `shotColor` instead of the Redux `FlamePuffClass` model.
 - **WARNING:** missing/misspelled `xplGround`, `xplVehicle`, and `xplBuilding` ODF references, checked against both local and stock ODF names. This catches errors such as `xmlasbld` vs `xlasbld` without flagging valid stock assets as missing.
 
-Rules are intentionally context-sensitive. For example, the scanner does **not** blindly rename every `[MagnetClass]` or `[flameClass]`; those labels are only diagnosed when the surrounding `classLabel` and class sections identify the specific Redux loader path.
+Rules are intentionally context-sensitive. For example, the scanner does **not** blindly rename every `[MagnetClass]` or `[flameClass]`; those labels are only diagnosed when the surrounding `classLabel` and base sections identify the specific Redux loader path.
+
+See [`docs/ODF_VALIDATION_SCHEMA.md`](docs/ODF_VALIDATION_SCHEMA.md) for schema design, evidence requirements, and the inheritance boundary.
+
+## Command-line ODF validation
+
+The same validator can be used without the GUI:
+
+```bash
+python odf_validator.py path/to/mod-folder
+python odf_validator.py path/to/mod.zip
+python odf_validator.py path/to/file.odf
+python odf_validator.py path/to/mod.zip --json
+```
+
+Exit codes are suitable for automation: `0` for warnings/no findings, `1` when errors are present, and `2` when a Critical crash-risk finding is present.
 
 ## Rule policy
 
@@ -37,7 +62,7 @@ ODF checks should be traceable to at least one of:
 2. a stock Redux ODF contract, or
 3. a reproducible runtime failure.
 
-The goal is to grow this into a codebase-rooted ODF preflight schema rather than a generic INI spell-checker.
+The goal is a codebase-rooted ODF preflight schema rather than a generic INI spell-checker. Unknown sections/keys are not automatically rejected while the schema is incomplete.
 
 ## Development
 
@@ -47,4 +72,4 @@ Run the regression suite with:
 python -m unittest discover -s tests -v
 ```
 
-The release workflow runs the same tests before packaging the integrated `scanner_app.py` front end for Windows, Linux, and macOS.
+The test suite includes minimized AbsoZero regression cases plus false-positive controls and ZIP scanning. The release workflow runs the tests before packaging the integrated `scanner_app.py` front end for Windows, Linux, and macOS.
