@@ -172,6 +172,8 @@ def _validate_loader_rules(doc: ODFDocument) -> List[ODFIssue]:
         keys = doc.keys(section)
 
         for alias in rule.key_aliases:
+            if alias.legacy_only and not is_legacy:
+                continue
             entry = keys.get(alias.legacy.lower())
             if not entry:
                 continue
