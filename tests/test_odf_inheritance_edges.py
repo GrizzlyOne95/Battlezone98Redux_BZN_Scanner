@@ -6,8 +6,8 @@ from pathlib import Path
 from odf_validator import validate_directory, validate_zip
 
 
-class ODFInheritanceEdgeTests(unittest.TestCase):
-    def test_ordnanceclass_basename_is_an_inheritance_root(self):
+class ODFBaseNameEdgeTests(unittest.TestCase):
+    def test_ordnanceclass_basename_is_not_a_file_dependency(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             (root / "child.odf").write_text(
@@ -15,13 +15,9 @@ class ODFInheritanceEdgeTests(unittest.TestCase):
                 encoding="latin-1",
             )
             issues = validate_directory(root)
-            self.assertTrue(any(
-                i.rule_id == "inheritance-missing-parent"
-                and i.section == "OrdnanceClass"
-                for i in issues
-            ))
+            self.assertFalse(any(i.rule_id.startswith("inheritance-") for i in issues))
 
-    def test_weaponclass_basename_is_an_inheritance_root(self):
+    def test_weaponclass_basename_is_not_a_file_dependency(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             (root / "child.odf").write_text(
@@ -29,13 +25,9 @@ class ODFInheritanceEdgeTests(unittest.TestCase):
                 encoding="latin-1",
             )
             issues = validate_directory(root)
-            self.assertTrue(any(
-                i.rule_id == "inheritance-missing-parent"
-                and i.section == "WeaponClass"
-                for i in issues
-            ))
+            self.assertFalse(any(i.rule_id.startswith("inheritance-") for i in issues))
 
-    def test_duplicate_zip_parent_basename_makes_reference_ambiguous(self):
+    def test_duplicate_zip_filenames_do_not_make_basename_parent_ambiguous(self):
         with tempfile.TemporaryDirectory() as td:
             archive = Path(td) / "duplicate-parent.zip"
             with zipfile.ZipFile(archive, "w") as zf:
@@ -46,9 +38,9 @@ class ODFInheritanceEdgeTests(unittest.TestCase):
                     '[GameObjectClass]\nbaseName="parent"\nclassLabel="wingman"\n',
                 )
             issues = validate_zip(archive)
-            self.assertTrue(any(
+            self.assertFalse(any(
                 i.filename == "child.odf"
-                and i.rule_id == "inheritance-ambiguous-parent"
+                and i.rule_id.startswith("inheritance-")
                 for i in issues
             ))
 
