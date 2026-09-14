@@ -18,6 +18,7 @@ class KeyAlias:
     canonical: str
     severity: str = "ERROR"
     message: str = ""
+    legacy_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -67,7 +68,8 @@ LOADER_RULES = (
                 legacy="basename",
                 canonical="baseName",
                 severity="WARNING",
-                message="Use Redux's canonical baseName spelling when migrating this section.",
+                message="Use Redux's canonical baseName spelling when migrating this legacy section.",
+                legacy_only=True,
             ),
         ),
     ),
