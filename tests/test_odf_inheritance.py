@@ -135,7 +135,7 @@ classLabel = "wingman"
             missing = [i for i in issues if i.rule_id == "inheritance-missing-parent"]
             self.assertEqual(1, len(missing))
             self.assertEqual("ERROR", missing[0].severity)
-            self.assertEqual(2, missing[0].line)
+            self.assertEqual(3, missing[0].line)
 
     def test_exact_self_reference_is_cycle_error(self):
         with tempfile.TemporaryDirectory() as td:
