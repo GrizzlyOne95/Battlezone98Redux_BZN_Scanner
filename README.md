@@ -39,7 +39,7 @@ Consequences for the scanner:
 - Missing/empty `baseName` means this field selects no base prototype, but that is **not automatically invalid** for every ODF. A class-specific warning should only be added when code proves that a particular loader requires a base prototype.
 - Lowercase `basename` remains distinct from canonical `baseName`; the validator does not invent a global case-insensitivity rule.
 
-The initial evidence-backed schema covers the failure family exposed by the legacy **AbsoZero** mission:
+The current evidence-backed schema covers the failure family exposed by the legacy **AbsoZero** mission plus additional mined loader mismatches:
 
 - **CRITICAL:** `classLabel = "flare"` using `[FlareBuildingClass]` instead of Redux `[FlareMineClass]`. The legacy section has no loader reader; `payloadName` can remain null and the flare firing path can fault while building the payload ordnance.
 - **CRITICAL:** canonical `[FlareMineClass]` with no `payloadName`.
@@ -49,9 +49,10 @@ The initial evidence-backed schema covers the failure family exposed by the lega
 - **ERROR:** scavenger objects using `[ScavengerCraftClass]` instead of `[ScavengerClass]`.
 - **ERROR/WARNING:** `classLabel = "flamepuff"` using legacy `[flameClass]` and unsupported fields such as `flameLength`, `variance`, and `shotColor`.
 - **WARNING:** `flameDelay` in `[FlamePuffClass]`; recovered code reads `frameDelay` instead.
+- **ERROR:** `classLabel = "explosion"` + `[OrdnanceClass]` using legacy `[Explosion]`; Redux reads explosion-specific fields from `[ExplosionClass]`, so keys under `[Explosion]` are not consumed by that loader.
 - **WARNING:** missing/misspelled `xplGround`, `xplVehicle`, and `xplBuilding` ODF references, checked against both local and stock ODF names. This catches errors such as `xmlasbld` vs `xlasbld` without flagging valid stock assets as missing.
 
-Rules are intentionally context-sensitive. For example, the scanner does **not** blindly rename every `[MagnetClass]` or `[flameClass]`; those names are diagnosed only when the surrounding `classLabel` and class sections identify a proven loader path.
+Rules are intentionally context-sensitive. For example, the scanner does **not** blindly rename every `[MagnetClass]`, `[flameClass]`, or `[Explosion]`; those names are diagnosed only when the surrounding `classLabel` and class sections identify a proven loader path.
 
 ## Provenance model
 
@@ -107,4 +108,4 @@ Run the regression suite with:
 python -m unittest discover -s tests -v
 ```
 
-The test suite includes minimized AbsoZero regression cases, false-positive controls, ZIP scanning, baseName non-file-inheritance regressions, and structured provenance checks. The release workflow runs the tests before packaging the integrated `scanner_app.py` front end for Windows, Linux, and macOS.
+The test suite includes minimized AbsoZero regression cases, false-positive controls, ZIP scanning, baseName non-file-inheritance regressions, mined-loader rules, and structured provenance checks. The release workflow runs the tests before packaging the integrated `scanner_app.py` front end for Windows, Linux, and macOS.
