@@ -22,27 +22,59 @@ The integrated GUI supports three entry points:
 
 ## ODF Validation
 
-The **ODF Validation** tab is read-only: the scanner reports findings and suggested fixes but never rewrites mission files. Findings include severity, file, line number where available, section/key, stable rule ID, suggested fix, and the evidence/source used for the rule.
+The **ODF Validation** tab is read-only: the scanner reports findings and suggested fixes but never rewrites mission files. Findings include severity, file, line number where available, section/key, stable rule ID, suggested fix, and structured evidence IDs/source details.
 
-Validation is driven by `odf_schema.py` rather than hard-coding every special case into the parser. Rules combine `classLabel` with the base class sections present in the ODF, which lets the checker distinguish loader paths that reuse similar legacy names.
+Validation is driven by `odf_schema.py` rather than hard-coding every special case into the parser. Rules combine `classLabel` with the class sections physically present in the ODF so the checker can distinguish loader paths that reuse similar legacy names.
 
-The validator also resolves **local canonical `baseName` inheritance**. It merges local parent chains parent-first, lets child values override inherited values, detects missing/cyclic/ambiguous parents, and can reason about inherited `classLabel`, class sections, and required fields. Known stock parents are deliberately treated as opaque: the scanner knows the parent exists but does not guess its contents. Lowercase `basename` remains inert rather than being silently promoted to `baseName`.
+### `baseName` selects a base/prototype; it is not ODF file inheritance
+
+Recovered loader mining changed the model here. Canonical `baseName` has a real code reader, but that reader does **not** open another `.odf` and merge its sections/keys into the child. Defaults come from the engine's base/prototype/class chain.
+
+Consequences for the scanner:
+
+- `baseName = "foo"` does **not** mean `foo.odf` must exist beside the child.
+- The scanner does not inherit `classLabel`, sections, or keys from `foo.odf`.
+- Cross-references through `baseName` do not form ODF file cycles.
+- A duplicate `foo.odf` filename does not make `baseName = "foo"` ambiguous file inheritance.
+- Missing/empty `baseName` means this field selects no base prototype, but that is **not automatically invalid** for every ODF. A class-specific warning should only be added when code proves that a particular loader requires a base prototype.
+- Lowercase `basename` remains distinct from canonical `baseName`; the validator does not invent a global case-insensitivity rule.
 
 The initial evidence-backed schema covers the failure family exposed by the legacy **AbsoZero** mission:
 
-- **CRITICAL:** `classLabel = "flare"` using `[FlareBuildingClass]` instead of Redux `[FlareMineClass]`. This can leave the payload class null and crash `FlareMine::Update()` when the flare fires.
-- **CRITICAL:** canonical/effective `[FlareMineClass]` with no `payloadName`.
-- **CRITICAL:** a fully resolved local flare chain with no effective `[FlareMineClass]` at all.
-- **ERROR:** legacy `[GameObject]` where Redux expects `[GameObjectClass]`, with migration guidance for canonical `baseName`.
+- **CRITICAL:** `classLabel = "flare"` using `[FlareBuildingClass]` instead of Redux `[FlareMineClass]`. The legacy section has no loader reader; `payloadName` can remain null and the flare firing path can fault while building the payload ordnance.
+- **CRITICAL:** canonical `[FlareMineClass]` with no `payloadName`.
+- **ERROR:** legacy `[GameObject]` where Redux dispatch expects `[GameObjectClass]`.
 - **ERROR:** magnet mine/ordnance ODFs using `[MagnetClass]` instead of `[MagnetMineClass]`.
 - **ERROR:** magnet mine `triggetDelay` typo instead of `triggerDelay`.
 - **ERROR:** scavenger objects using `[ScavengerCraftClass]` instead of `[ScavengerClass]`.
-- **ERROR/WARNING:** `classLabel = "flamepuff"` using legacy `[flameClass]` and fields such as `flameLength`, `variance`, and `shotColor` instead of the Redux `FlamePuffClass` model.
+- **ERROR/WARNING:** `classLabel = "flamepuff"` using legacy `[flameClass]` and unsupported fields such as `flameLength`, `variance`, and `shotColor`.
+- **WARNING:** `flameDelay` in `[FlamePuffClass]`; recovered code reads `frameDelay` instead.
 - **WARNING:** missing/misspelled `xplGround`, `xplVehicle`, and `xplBuilding` ODF references, checked against both local and stock ODF names. This catches errors such as `xmlasbld` vs `xlasbld` without flagging valid stock assets as missing.
 
-Rules are intentionally context-sensitive. For example, the scanner does **not** blindly rename every `[MagnetClass]` or `[flameClass]`; those labels are only diagnosed when the surrounding `classLabel` and base sections identify the specific Redux loader path.
+Rules are intentionally context-sensitive. For example, the scanner does **not** blindly rename every `[MagnetClass]` or `[flameClass]`; those names are diagnosed only when the surrounding `classLabel` and class sections identify a proven loader path.
 
-See [`docs/ODF_VALIDATION_SCHEMA.md`](docs/ODF_VALIDATION_SCHEMA.md) for schema design, evidence requirements, and inheritance semantics.
+## Provenance model
+
+Structured evidence lives in `odf_evidence.py`. Evidence records can identify the evidence kind, confidence, recovered function/address, repository/path when actually verified, stock examples, runtime reproductions, and a concise statement of what the evidence proves.
+
+Confidence vocabulary:
+
+- `confirmed-code` - behavior directly recovered from loader/decomp code.
+- `code+stock` - code behavior corroborated by stock content or runtime reproduction.
+- `stock-only` - observed in stock content but not yet proven by code.
+- `inferred` - research lead only; never enough by itself for a hard validator rule.
+
+Redux executable addresses are kept distinct from BZ1_Source corroboration. The scanner does not claim a BZ1_Source file path for a Redux address unless that exact path has been independently verified.
+
+The flare crash rule carries the recovered chain:
+
+`FlareMineClass::Load 0x004D2B10 -> FlareMine::Update 0x004D2E90 -> OrdnanceClass::Build 0x00586FF0`
+
+with the confirmed null dereference at `0x00586FFC`.
+
+Research output is **not automatically validator policy**. Hash-only, name-unresolved, inferred, and stock-only discoveries remain research data until reviewed and promoted deliberately.
+
+See [`docs/ODF_VALIDATION_SCHEMA.md`](docs/ODF_VALIDATION_SCHEMA.md) for the schema contract and evidence policy.
 
 ## Command-line ODF validation
 
@@ -65,7 +97,7 @@ ODF checks should be traceable to at least one of:
 2. a stock Redux ODF contract, or
 3. a reproducible runtime failure.
 
-The goal is a codebase-rooted ODF preflight schema rather than a generic INI spell-checker. Unknown sections/keys are not automatically rejected while the schema is incomplete, and effective-state claims are withheld when an inheritance parent is opaque.
+The goal is a codebase-rooted ODF preflight schema rather than a generic INI spell-checker. Unknown sections/keys are not automatically rejected while the schema is incomplete.
 
 ## Development
 
@@ -75,4 +107,4 @@ Run the regression suite with:
 python -m unittest discover -s tests -v
 ```
 
-The test suite includes minimized AbsoZero regression cases, false-positive controls, ZIP scanning, and local inheritance/cycle/override coverage. The release workflow runs the tests before packaging the integrated `scanner_app.py` front end for Windows, Linux, and macOS.
+The test suite includes minimized AbsoZero regression cases, false-positive controls, ZIP scanning, baseName non-file-inheritance regressions, and structured provenance checks. The release workflow runs the tests before packaging the integrated `scanner_app.py` front end for Windows, Linux, and macOS.
