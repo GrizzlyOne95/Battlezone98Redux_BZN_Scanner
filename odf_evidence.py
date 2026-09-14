@@ -188,6 +188,18 @@ EVIDENCE: Dict[str, ODFEvidence] = {
             "dispatch path while its keys remain unread."
         ),
     ),
+    "redux-spraybuilding-contract": ODFEvidence(
+        evidence_id="redux-spraybuilding-contract",
+        kind="loader-contract",
+        confidence="code+stock",
+        title="Redux SprayBuildingClass section contract",
+        detail=(
+            "Recovered code reads spray-building-specific fields from "
+            "[SprayBuildingClass]. The misspelled [SprayBuildngClass] section has no "
+            "recovered reader; the mining audit found that spelling in four stock "
+            "spray-building ODFs, leaving their intended section fields unread."
+        ),
+    ),
     "odf-reference-resolution": ODFEvidence(
         evidence_id="odf-reference-resolution",
         kind="package-check",
