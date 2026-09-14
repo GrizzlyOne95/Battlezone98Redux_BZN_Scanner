@@ -50,6 +50,9 @@ class LoaderRule:
     key_aliases: Tuple[KeyAlias, ...] = ()
     required_keys: Tuple[RequiredKey, ...] = ()
     legacy_keys: Tuple[LegacyKey, ...] = ()
+    missing_section_severity: str = ""
+    missing_section_message: str = ""
+    missing_section_suggestion: str = ""
 
 
 LOADER_RULES = (
@@ -97,6 +100,13 @@ LOADER_RULES = (
                 suggestion="Set payloadName to a valid ordnance ODF base name.",
             ),
         ),
+        missing_section_severity="CRITICAL",
+        missing_section_message=(
+            "The fully resolved local inheritance chain has no [FlareMineClass]. "
+            "For a flare mine this leaves no loader path to initialize payloadName, "
+            "which can produce the confirmed null-payload FlareMine::Update() crash."
+        ),
+        missing_section_suggestion="Add [FlareMineClass] with a valid payloadName, or inherit it from a valid parent ODF.",
     ),
     LoaderRule(
         rule_id="magnet-mine",
@@ -169,7 +179,8 @@ LOADER_RULES = (
 
 
 # ODF-valued keys that can be checked against the combined local + stock ODF
-# namespace without needing to understand a full inheritance graph yet.
+# namespace. Effective inherited values are checked only when the local chain is
+# fully known; opaque stock parents are never guessed.
 REFERENCE_KEYS = {
     "FlareMineClass": {
         "payloadName": "ERROR",
@@ -182,4 +193,4 @@ REFERENCE_KEYS = {
 }
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
