@@ -1,9 +1,9 @@
 """Structured provenance for ODF validation rules.
 
 Evidence entries are intentionally conservative. Exact native addresses and
-repository paths are recorded only when they have been verified; an empty field
-means the checker knows the evidence category/claim but does not pretend to know
-an exact location yet.
+repository paths are recorded only when independently verified. Redux executable
+addresses are not attributed to BZ1_Source unless a concrete matching artifact
+path is known.
 """
 
 from __future__ import annotations
@@ -12,20 +12,31 @@ from dataclasses import dataclass
 from typing import Dict, Iterable, Tuple
 
 
+EVIDENCE_CONFIDENCE = (
+    "confirmed-code",
+    "code+stock",
+    "stock-only",
+    "inferred",
+)
+
+
 @dataclass(frozen=True)
 class ODFEvidence:
     evidence_id: str
     kind: str
     title: str
     detail: str
+    confidence: str = "confirmed-code"
     function: str = ""
     address: str = ""
     related_addresses: Tuple[str, ...] = ()
     repository: str = ""
     path: str = ""
+    stock_file: str = ""
+    runtime_case: str = ""
 
     def summary(self) -> str:
-        parts = [f"[{self.kind}] {self.title}"]
+        parts = [f"[{self.kind}/{self.confidence}] {self.title}"]
         if self.function:
             location = self.function
             if self.address:
@@ -40,6 +51,10 @@ class ODFEvidence:
             if self.path:
                 repo += f"/{self.path}"
             parts.append(repo)
+        if self.stock_file:
+            parts.append(f"stock: {self.stock_file}")
+        if self.runtime_case:
+            parts.append(f"runtime: {self.runtime_case}")
         parts.append(self.detail)
         return " — ".join(parts)
 
@@ -47,11 +62,11 @@ class ODFEvidence:
 EVIDENCE: Dict[str, ODFEvidence] = {
     "redux-flaremine-load": ODFEvidence(
         evidence_id="redux-flaremine-load",
-        kind="decomp",
+        kind="redux-decomp",
+        confidence="confirmed-code",
         title="Redux flare payload loader",
         function="FlareMineClass::Load",
         address="0x004D2B10",
-        repository="GrizzlyOne95/BZ1_Source",
         detail=(
             "The recovered Redux loader populates the flare payload OrdnanceClass "
             "from payloadName only through the FlareMineClass loader section. A "
@@ -60,12 +75,12 @@ EVIDENCE: Dict[str, ODFEvidence] = {
     ),
     "redux-flaremine-update-null-payload": ODFEvidence(
         evidence_id="redux-flaremine-update-null-payload",
-        kind="decomp",
+        kind="redux-decomp",
+        confidence="confirmed-code",
         title="Redux flare update null-payload dereference path",
         function="FlareMine::Update(float)",
         address="0x004D2E90",
         related_addresses=("call 0x004D3093", "callee 0x00586FF0", "fault 0x00586FFC"),
-        repository="GrizzlyOne95/BZ1_Source",
         detail=(
             "Update reads the FlareMineClass pointer from the object, then its "
             "payload OrdnanceClass pointer at class offset +0x168. The downstream "
@@ -73,10 +88,25 @@ EVIDENCE: Dict[str, ODFEvidence] = {
             "confirmed read-at-0x38 access violation."
         ),
     ),
+    "redux-ordnance-build-null-payload": ODFEvidence(
+        evidence_id="redux-ordnance-build-null-payload",
+        kind="redux-decomp",
+        confidence="confirmed-code",
+        title="Redux ordnance build null-class dereference",
+        function="OrdnanceClass::Build",
+        address="0x00586FF0",
+        related_addresses=("fault 0x00586FFC",),
+        detail=(
+            "The payload build path dereferences class state at +0x38 without a "
+            "null guard, completing the confirmed FlareMine crash chain."
+        ),
+    ),
     "absozero-flare-crash-repro": ODFEvidence(
         evidence_id="absozero-flare-crash-repro",
         kind="runtime-repro",
+        confidence="code+stock",
         title="AbsoZero flare crash reproduction",
+        runtime_case="AbsoZero FlareBuildingClass -> FlareMineClass repair",
         detail=(
             "Legacy AbsoZero flare ODFs used [FlareBuildingClass]. Renaming that "
             "section to [FlareMineClass] allowed payload loading and eliminated the "
@@ -86,27 +116,41 @@ EVIDENCE: Dict[str, ODFEvidence] = {
     "stock-flare-section-contract": ODFEvidence(
         evidence_id="stock-flare-section-contract",
         kind="stock-contract",
+        confidence="code+stock",
         title="Stock Redux flare ODF section contract",
+        stock_file="flare.odf",
         detail="The stock Redux flare ODF uses [FlareMineClass] for flare-specific fields.",
     ),
     "redux-gameobjectclass-contract": ODFEvidence(
         evidence_id="redux-gameobjectclass-contract",
         kind="loader-contract",
+        confidence="confirmed-code",
         title="Redux GameObjectClass root contract",
-        repository="GrizzlyOne95/BZ1_Source",
         detail=(
-            "Recovered Redux loader behavior and stock ODFs use [GameObjectClass] "
-            "for the object-class root. No exact native function address is recorded "
-            "here until independently verified."
+            "Recovered loader dispatch uses [GameObjectClass] for the object-class "
+            "root. [GameObject] does not dispatch through that loader path."
+        ),
+    ),
+    "redux-basename-prototype-selection": ODFEvidence(
+        evidence_id="redux-basename-prototype-selection",
+        kind="loader-contract",
+        confidence="confirmed-code",
+        title="Redux baseName prototype-selection semantics",
+        detail=(
+            "Recovered code has a single canonical baseName reader, but it does not "
+            "load or merge another ODF file. baseName participates in base/prototype "
+            "selection; defaults come from the engine prototype/class chain. A "
+            "missing or empty baseName therefore means no base prototype is selected "
+            "by this field, but absence is not automatically invalid for every ODF."
         ),
     ),
     "redux-magnetmine-contract": ODFEvidence(
         evidence_id="redux-magnetmine-contract",
         kind="loader-contract",
+        confidence="confirmed-code",
         title="Redux MagnetMineClass contract",
-        repository="GrizzlyOne95/BZ1_Source",
         detail=(
-            "Recovered Redux/stock magnet-mine behavior uses [MagnetMineClass] and "
+            "Recovered magnet-mine loader behavior uses [MagnetMineClass] and "
             "triggerDelay for the mine/ordnance path. Building magnets are a distinct "
             "path and are intentionally excluded by the schema context."
         ),
@@ -114,42 +158,33 @@ EVIDENCE: Dict[str, ODFEvidence] = {
     "redux-scavenger-contract": ODFEvidence(
         evidence_id="redux-scavenger-contract",
         kind="loader-contract",
+        confidence="confirmed-code",
         title="Redux ScavengerClass contract",
-        repository="GrizzlyOne95/BZ1_Source",
         detail=(
-            "Recovered Redux loader behavior and stock scavenger ODFs use "
-            "[ScavengerClass], not the legacy [ScavengerCraftClass] section."
+            "Recovered scavenger loader behavior uses [ScavengerClass]; "
+            "[ScavengerCraftClass] has no recovered code reader."
         ),
     ),
     "redux-flamepuff-contract": ODFEvidence(
         evidence_id="redux-flamepuff-contract",
         kind="loader-contract",
+        confidence="confirmed-code",
         title="Redux FlamePuffClass contract",
-        repository="GrizzlyOne95/BZ1_Source",
         detail=(
-            "Recovered Redux loader behavior and stock flame-puff ODFs use "
-            "[FlamePuffClass] and the Redux flameRadius/flameDelay/flameTexture/"
-            "flameFrames model."
+            "Recovered flame-puff loader behavior uses [FlamePuffClass]. The code "
+            "reads frameDelay; the shipped flameDelay spelling has no recovered "
+            "reader. Other legacy-only fields must be judged against the mined key set."
         ),
     ),
     "odf-reference-resolution": ODFEvidence(
         evidence_id="odf-reference-resolution",
         kind="package-check",
+        confidence="confirmed-code",
         title="ODF reference namespace validation",
         detail=(
             "The referenced ODF name is checked against the combined scanned local "
             "package and known stock ODF filename namespace. Near-miss suggestions "
             "are advisory and never rewrite files."
-        ),
-    ),
-    "odf-basename-inheritance": ODFEvidence(
-        evidence_id="odf-basename-inheritance",
-        kind="loader-contract",
-        title="Canonical baseName inheritance contract",
-        detail=(
-            "The scanner follows only exact canonical baseName declarations and "
-            "resolves proven local parent chains. Opaque stock parents are not "
-            "treated as if their contents were known."
         ),
     ),
 }
