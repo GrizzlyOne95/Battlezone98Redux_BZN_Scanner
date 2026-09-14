@@ -1,8 +1,9 @@
 """Evidence-backed Battlezone 98 Redux ODF loader schema.
 
-This module is intentionally data-only. The validator consumes these rules so
-new loader findings can be added without growing a chain of one-off conditionals.
-Each rule should be traceable to structured provenance in odf_evidence.py.
+This module is intentionally data-only. The validator consumes these curated
+rules so new loader findings can be added without growing a chain of one-off
+conditionals. Each hard rule should be traceable to structured provenance in
+odf_evidence.py.
 """
 
 from __future__ import annotations
@@ -60,6 +61,8 @@ class LoaderRule:
     key_aliases: Tuple[KeyAlias, ...] = ()
     required_keys: Tuple[RequiredKey, ...] = ()
     legacy_keys: Tuple[LegacyKey, ...] = ()
+    # Retained for schema compatibility. Absence-based section diagnostics must
+    # be backed by direct loader/prototype evidence before use.
     missing_section_severity: str = ""
     missing_section_message: str = ""
     missing_section_suggestion: str = ""
@@ -72,19 +75,26 @@ LOADER_RULES = (
         legacy_sections=("GameObject",),
         section_severity="ERROR",
         section_message=(
-            "Redux object-class data is loaded from [GameObjectClass]; the legacy "
-            "[GameObject] section is not consumed by this loader path."
+            "Redux object-class data is dispatched from [GameObjectClass]; the "
+            "legacy [GameObject] section is not consumed by this loader path."
         ),
-        source="Redux GameObjectClass loader / stock ODF contract",
+        source="Redux GameObjectClass loader dispatch",
         evidence_ids=("redux-gameobjectclass-contract",),
         key_aliases=(
             KeyAlias(
                 legacy="basename",
                 canonical="baseName",
                 severity="WARNING",
-                message="Use Redux's canonical baseName spelling when migrating this legacy section.",
+                message=(
+                    "Use Redux's canonical baseName spelling when migrating this "
+                    "legacy section. baseName selects a base/prototype; it is not "
+                    "ODF file inheritance."
+                ),
                 legacy_only=True,
-                evidence_ids=("redux-gameobjectclass-contract", "odf-basename-inheritance"),
+                evidence_ids=(
+                    "redux-gameobjectclass-contract",
+                    "redux-basename-prototype-selection",
+                ),
             ),
         ),
     ),
@@ -96,14 +106,16 @@ LOADER_RULES = (
         required_sections=("MineClass",),
         section_severity="CRITICAL",
         section_message=(
-            "Redux loads flare-specific data from [FlareMineClass]. If a legacy "
-            "section is ignored, payloadName never reaches the class object and "
-            "FlareMine::Update() can dereference a null payload OrdnanceClass pointer."
+            "Redux loads flare-specific data from [FlareMineClass]. The legacy "
+            "[FlareBuildingClass] section has no loader reader, so payloadName can "
+            "remain null and the flare firing path can dereference a null payload "
+            "OrdnanceClass pointer."
         ),
-        source="FlareMineClass::Load / FlareMine::Update runtime crash trace",
+        source="Recovered Redux flare loader/update/build crash chain",
         evidence_ids=(
             "redux-flaremine-load",
             "redux-flaremine-update-null-payload",
+            "redux-ordnance-build-null-payload",
             "stock-flare-section-contract",
             "absozero-flare-crash-repro",
         ),
@@ -112,24 +124,18 @@ LOADER_RULES = (
                 name="payloadName",
                 severity="CRITICAL",
                 message=(
-                    "FlareMineClass has no payloadName; runtime flare update can "
-                    "dereference a null payload class."
+                    "FlareMineClass has no payloadName; the firing path can reach "
+                    "OrdnanceClass::Build with a null payload class."
                 ),
                 suggestion="Set payloadName to a valid ordnance ODF base name.",
                 evidence_ids=(
                     "redux-flaremine-load",
                     "redux-flaremine-update-null-payload",
+                    "redux-ordnance-build-null-payload",
                     "absozero-flare-crash-repro",
                 ),
             ),
         ),
-        missing_section_severity="CRITICAL",
-        missing_section_message=(
-            "The fully resolved local inheritance chain has no [FlareMineClass]. "
-            "For a flare mine this leaves no loader path to initialize payloadName, "
-            "which can produce the confirmed null-payload FlareMine::Update() crash."
-        ),
-        missing_section_suggestion="Add [FlareMineClass] with a valid payloadName, or inherit it from a valid parent ODF.",
     ),
     LoaderRule(
         rule_id="magnet-mine",
@@ -142,14 +148,17 @@ LOADER_RULES = (
             "This is the magnet mine/ordnance loader path. Redux reads mine-specific "
             "magnet parameters from [MagnetMineClass], not [MagnetClass]."
         ),
-        source="Redux MagnetMineClass loader / stock magnet-mine ODF contract",
+        source="Recovered Redux MagnetMineClass loader contract",
         evidence_ids=("redux-magnetmine-contract",),
         key_aliases=(
             KeyAlias(
                 legacy="triggetDelay",
                 canonical="triggerDelay",
                 severity="ERROR",
-                message="The misspelled triggetDelay key is not read by the Redux MagnetMineClass loader.",
+                message=(
+                    "The misspelled triggetDelay key has no recovered reader; the "
+                    "Redux MagnetMineClass loader reads triggerDelay."
+                ),
                 evidence_ids=("redux-magnetmine-contract",),
             ),
         ),
@@ -163,9 +172,9 @@ LOADER_RULES = (
         section_severity="ERROR",
         section_message=(
             "Redux reads scavenger-specific fields from [ScavengerClass]; "
-            "[ScavengerCraftClass] is a legacy section name."
+            "[ScavengerCraftClass] has no recovered loader reader."
         ),
-        source="Redux ScavengerClass loader / stock scavenger ODF contract",
+        source="Recovered Redux ScavengerClass loader contract",
         evidence_ids=("redux-scavenger-contract",),
     ),
     LoaderRule(
@@ -179,28 +188,40 @@ LOADER_RULES = (
             "This ODF is classLabel=flamepuff. Redux reads flame-puff data from "
             "[FlamePuffClass], not the legacy [flameClass] section."
         ),
-        source="Redux FlamePuffClass loader / stock flame-puff ODF contract",
+        source="Recovered Redux FlamePuffClass loader contract",
         evidence_ids=("redux-flamepuff-contract",),
+        key_aliases=(
+            KeyAlias(
+                legacy="flameDelay",
+                canonical="frameDelay",
+                severity="WARNING",
+                message=(
+                    "flameDelay has no recovered reader on the Redux FlamePuffClass "
+                    "loader; the code reads frameDelay."
+                ),
+                evidence_ids=("redux-flamepuff-contract",),
+            ),
+        ),
         legacy_keys=(
             LegacyKey(
                 name="flameLength",
                 severity="WARNING",
-                message="flameLength is not part of the Redux FlamePuffClass key set.",
-                suggestion="Use the Redux flameRadius/flameDelay/flameTexture/flameFrames model as appropriate.",
+                message="flameLength is not part of the recovered Redux FlamePuffClass key set.",
+                suggestion="Remove or replace it only after matching the intended effect to a code-read FlamePuffClass field.",
                 evidence_ids=("redux-flamepuff-contract",),
             ),
             LegacyKey(
                 name="variance",
                 severity="WARNING",
-                message="variance is not part of the Redux FlamePuffClass key set.",
-                suggestion="Use the Redux flameRadius/flameDelay/flameTexture/flameFrames model as appropriate.",
+                message="variance is not part of the recovered Redux FlamePuffClass key set.",
+                suggestion="Remove or replace it only after matching the intended effect to a code-read FlamePuffClass field.",
                 evidence_ids=("redux-flamepuff-contract",),
             ),
             LegacyKey(
                 name="shotColor",
                 severity="WARNING",
-                message="shotColor is not part of the Redux FlamePuffClass key set.",
-                suggestion="Use the Redux flameRadius/flameDelay/flameTexture/flameFrames model as appropriate.",
+                message="shotColor is not part of the recovered Redux FlamePuffClass key set.",
+                suggestion="Remove or replace it only after matching the intended effect to a code-read FlamePuffClass field.",
                 evidence_ids=("redux-flamepuff-contract",),
             ),
         ),
@@ -224,4 +245,4 @@ REFERENCE_KEYS = {
 }
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
