@@ -2,39 +2,100 @@
 
 The ODF checker is deliberately **loader-oriented**, not a generic INI linter.
 
-`odf_schema.py` describes evidence-backed Redux loader contracts. `odf_inheritance.py` resolves the inheritance relationships that can be proven from the scanned package, and `odf_validator.py` evaluates the resulting effective ODF state. This keeps loader knowledge, inheritance mechanics, and diagnostics separate and gives every finding a stable rule ID.
+`odf_schema.py` contains curated, evidence-backed Redux loader contracts. `odf_validator.py` evaluates the physical ODF declarations against those contracts. Research output may contain far more discovered sections/keys than the curated validator exposes; that separation is intentional.
 
 ## Evidence policy
 
-A rule should only be added when it is supported by at least one of:
+A hard validator rule should only be added when its behavior is supported strongly enough to justify user-facing diagnostics. Preferred evidence is:
 
 1. Redux executable/decomp loader behavior,
-2. a stock Redux ODF contract, or
-3. a reproducible runtime failure.
+2. code behavior corroborated by stock Redux ODFs,
+3. a reproducible runtime failure tied back to the loader path.
+
+Stock-only observations are useful research evidence but should not automatically become hard failures. `inferred`, hash-only, or name-unresolved findings are parse/report research data only until separately verified.
 
 The current schema is intentionally incomplete. Unknown sections and keys are **not** automatically treated as invalid. That would create unacceptable false positives for custom/legacy content.
 
-## Initial loader rules
+## Structured provenance
+
+Schema version 3 adds `EvidenceRef` records to curated rules. An evidence record can carry:
+
+- evidence kind,
+- confidence,
+- repository and path,
+- recovered function/symbol,
+- executable address,
+- source commit,
+- representative stock file,
+- runtime reproduction identifier, and
+- a concise statement of what the evidence proves.
+
+Confidence vocabulary is deliberately small:
+
+| Confidence | Meaning |
+| --- | --- |
+| `confirmed-code` | Behavior directly recovered from loader/decomp code. |
+| `code+stock` | Code behavior corroborated by stock content or runtime reproduction. |
+| `stock-only` | Observed in stock content but not yet code-proven. |
+| `inferred` | Hypothesis/research lead; never sufficient by itself for a hard rule. |
+
+Research corpus entries should be reviewed before promotion into `LOADER_RULES`. The validator must not turn "found in the mining JSON" into "invalid ODF" automatically.
+
+## Current loader rules
 
 | Rule ID | Context | Redux section | Legacy/problem section | Severity |
 | --- | --- | --- | --- | --- |
-| `game-object-root` | object root | `GameObjectClass` | `GameObject` | Error |
+| `game-object-root` | object root dispatch | `GameObjectClass` | `GameObject` | Error |
 | `flare-mine` | `classLabel=flare` + `MineClass` | `FlareMineClass` | `FlareBuildingClass` | Critical |
 | `magnet-mine` | `classLabel=magnet` + `OrdnanceClass` + `MineClass` | `MagnetMineClass` | `MagnetClass` | Error |
 | `scavenger` | `classLabel=scavenger` + `CraftClass` | `ScavengerClass` | `ScavengerCraftClass` | Error |
 | `flame-puff` | `classLabel=flamepuff` + `OrdnanceClass` | `FlamePuffClass` | `flameClass` | Error |
 
-The context is important. `[MagnetClass]` is not globally invalid: building magnets use a different path and must not be rewritten as magnet mines. Likewise, `[flameClass]` is only diagnosed as a `FlamePuffClass` migration when the ODF itself identifies the flame-puff loader path.
+Context is important. Similar section names can be used in unrelated legacy content, so the scanner only applies migration rules when the surrounding loader path is proven.
 
-## Crash-risk semantics
+## Flare crash provenance
 
-`flare-mine` is currently the strongest semantic rule. A legacy `[FlareBuildingClass]` can leave the native flare payload pointer null because Redux never consumes that section. `FlareMine::Update()` later dereferences the payload class, producing the confirmed access violation. A canonical `[FlareMineClass]` with an empty/missing effective `payloadName` is therefore also Critical.
+`flare-mine` has a concrete recovered failure chain:
 
-When the scanner has a **complete local inheritance chain**, it can now also prove the stronger absence case: a `classLabel=flare` / `MineClass` object with no effective `[FlareMineClass]` is Critical because no resolved loader section can initialize the payload at all.
+1. `FlareMineClass::Load` at `0x004D2B10` resolves `payloadName` into the payload `OrdnanceClass` pointer.
+2. `FlareMine::Update(float)` at `0x004D2E90` follows that payload pointer when the mine fires.
+3. `OrdnanceClass::Build` at `0x00586FF0` reaches an unguarded dereference when the payload class is null.
+4. The confirmed AbsoZero access violation occurs at `0x00586FFC`, reading `+0x38` through a null class pointer.
+
+`[FlareBuildingClass]` has no loader reader in the mined code corpus, so putting `payloadName` there does not initialize the field consumed by the flare firing path. A canonical `[FlareMineClass]` with no `payloadName` is likewise Critical.
+
+The scanner deliberately does **not** infer that every flare lacking a physical `[FlareMineClass]` must crash. That stronger absence claim depends on prototype/default semantics and is not made without direct proof.
+
+## `baseName` is not ODF file inheritance
+
+A previous scanner revision treated canonical `baseName` as an ODF-to-ODF inheritance edge. That model was removed after loader mining showed:
+
+- `baseName` has a real code reader,
+- but that reader does **not** load another ODF and merge its sections or keys,
+- defaults instead come from the engine's prototype/class chain.
+
+Therefore the validator does not:
+
+- merge a `baseName` target into the child ODF,
+- inherit `classLabel` or loader sections from another file,
+- treat a missing `baseName` target as a dependency error,
+- construct file-level cycles from `baseName`, or
+- suppress a physical missing key because another ODF happens to have the referenced filename.
+
+Lowercase `basename` also remains distinct from canonical `baseName`; the scanner does not invent global case-insensitivity rules.
+
+## Key spelling and dead-field policy
+
+Key spelling is only judged when code evidence identifies the consumed key. Current examples include:
+
+- `MagnetMineClass.triggerDelay` is code-read; `triggetDelay` has no reader.
+- `FlamePuffClass.frameDelay` is code-read; `flameDelay` has no recovered reader despite appearing in stock content.
+
+This is exactly why stock files are corroboration rather than absolute truth: shipped content can contain dead or misspelled fields too.
 
 ## ODF references
 
-The schema currently validates these ODF-valued fields against the combined local + stock namespace:
+The schema currently validates these ODF-valued fields against the combined local + stock filename namespace:
 
 - `FlareMineClass.payloadName`
 - `OrdnanceClass.xplGround`
@@ -43,44 +104,32 @@ The schema currently validates these ODF-valued fields against the combined loca
 
 Near-miss names receive a suggested replacement, which catches cases such as `xmlasbld` vs `xlasbld`.
 
-## `baseName` inheritance
+Reference checking is a filename/dependency check only. It does not imply `baseName` file inheritance.
 
-Inheritance resolution is intentionally conservative.
+## Research corpus boundary
 
-- Only the exact canonical key **`baseName`** is followed. Lowercase `basename` is not promoted into inheritance semantics.
-- Canonical roots currently checked for `baseName` are `GameObjectClass`, `OrdnanceClass`, and `WeaponClass`.
-- Local parent ODFs are resolved recursively, case-insensitively by filename, and their sections/keys are merged parent-first so child values override parent values.
-- `classLabel`, class sections, and required keys can therefore be inherited from a local parent.
-- Self references and multi-file cycles are Errors.
-- Missing custom parents are Errors.
-- Duplicate ODF basenames that make a parent ambiguous are Errors.
-- A parent found only in the known stock ODF namespace is **opaque**, not missing. The scanner knows the stock filename exists but does not pretend to know that parent ODF's contents.
+The loader-mining corpus is intentionally broader than the validator. It may contain:
 
-That last rule is important. An opaque stock parent prevents absence-based claims. For example, a child flare that inherits a stock ODF is not called broken merely because the package itself lacks `[FlareMineClass]`; the stock parent may provide it. Positive local errors such as a legacy `[MagnetClass]` are still reported.
+- keyed loaders,
+- zero-key chain links,
+- hash-only sections,
+- name-unresolved keys,
+- stock-only anomalies,
+- code-proven crash risks,
+- guarded conditions that are explicitly safe.
 
-## Effective-value policy
-
-The scanner distinguishes two classes of findings:
-
-1. **Positive/local evidence** — a bad section, misspelled key, explicit blank required field, or bad reference physically present in the file. These can be reported even when the parent is opaque.
-2. **Absence/effective-state evidence** — a missing loader section or inherited required field. These are reported only when the entire inheritance chain is locally known.
-
-This prevents the schema from turning incomplete package knowledge into false positives.
+The validator should promote only the subset that has a clear, defensible user-facing consequence. Guarded code paths are recorded specifically to avoid false-positive "crash risk" rules.
 
 ## Regression corpus
 
-The test suite contains minimized versions of the failure family recovered from the AbsoZero mission: three flare crash definitions, magnet-mine legacy sections and misspelled `triggetDelay`, scavenger section mismatches, the legacy GameObject root, flame-puff fields, the `xmlasbld` typo, plus a building magnet negative control.
+The test suite contains minimized versions of the AbsoZero failure family plus false-positive controls. It verifies:
 
-Inheritance tests additionally cover:
-
-- local parent supplying a class label, loader section, and `payloadName`,
-- child sections inheriting missing keys from their local parent,
-- explicit child values overriding inherited values,
-- complete chains with no `FlareMineClass`,
-- opaque stock parents,
-- missing custom parents,
-- exact self-reference and multi-file cycles,
-- lowercase `basename` remaining inert, and
-- referenced-only validation still resolving unselected local parents.
-
-ZIP validation is also covered so packaged mods can be checked without extraction.
+- flare legacy-section and missing-payload crash findings,
+- magnet mine section and `triggerDelay` spelling,
+- scavenger section naming,
+- flame-puff legacy fields and `frameDelay` spelling,
+- legacy `GameObject` root dispatch,
+- ODF reference typo detection,
+- ZIP validation without extraction,
+- no fabricated `baseName` parent merging, cycles, or missing-parent diagnostics,
+- and concrete provenance addresses for the flare crash chain.
