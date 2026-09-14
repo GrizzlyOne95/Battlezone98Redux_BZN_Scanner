@@ -1,9 +1,10 @@
 import os
 import tkinter as tk
+from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from bzn_scan import BZNParser, STOCK_SET
-from odf_validator import validate_directory
+from odf_validator import validate_directory, validate_zip
 
 
 SEVERITY_ORDER = {"CRITICAL": 0, "ERROR": 1, "WARNING": 2, "INFO": 3}
@@ -12,16 +13,22 @@ SEVERITY_ORDER = {"CRITICAL": 0, "ERROR": 1, "WARNING": 2, "INFO": 3}
 class BZNScannerApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("BZ98R BZN Scanner")
-        self.root.geometry("1180x720")
+        self.root.title("BZ98R Mission Scanner")
+        self.root.geometry("1280x760")
+
         self.current_file = None
+        self.source_kind = None  # bzn | folder | zip
+        self.source_path = None
         self.dependency_data = []
         self.issue_data = []
+        self.issue_lookup = {}
 
         controls = tk.Frame(root)
         controls.pack(pady=(10, 4), padx=10, fill=tk.X)
 
         tk.Button(controls, text="Load BZN", command=self.load_file).pack(side=tk.LEFT)
+        tk.Button(controls, text="Scan ODF Folder", command=self.load_folder).pack(side=tk.LEFT, padx=(8, 0))
+        tk.Button(controls, text="Scan ZIP", command=self.load_zip).pack(side=tk.LEFT, padx=(8, 0))
 
         self.custom_only = tk.BooleanVar(value=False)
         tk.Checkbutton(
@@ -29,17 +36,19 @@ class BZNScannerApp:
             text="Custom ODFs Only",
             variable=self.custom_only,
             command=self.refresh_dependencies,
-        ).pack(side=tk.LEFT, padx=(12, 0))
+        ).pack(side=tk.LEFT, padx=(18, 0))
 
         self.referenced_only = tk.BooleanVar(value=False)
-        tk.Checkbutton(
+        self.referenced_check = tk.Checkbutton(
             controls,
             text="Validate Referenced ODFs Only",
             variable=self.referenced_only,
             command=self.revalidate,
-        ).pack(side=tk.LEFT, padx=(12, 0))
+        )
+        self.referenced_check.pack(side=tk.LEFT, padx=(12, 0))
+        self.referenced_check.configure(state=tk.DISABLED)
 
-        self.status_lbl = tk.Label(root, text="Select a BZN to begin", fg="gray", anchor="w")
+        self.status_lbl = tk.Label(root, text="Load a BZN, ODF folder, or ZIP to begin", fg="gray", anchor="w")
         self.status_lbl.pack(padx=10, fill=tk.X)
 
         self.notebook = ttk.Notebook(root)
@@ -61,23 +70,25 @@ class BZNScannerApp:
         self.dep_tree.heading("filename", text="Filename", command=lambda: self.sort_dependency_column("filename", False))
         self.dep_tree.column("status", width=110, stretch=False)
         self.dep_tree.column("type", width=110, stretch=False)
-        self.dep_tree.column("filename", width=850)
+        self.dep_tree.column("filename", width=900)
         self.dep_tree.tag_configure("missing", foreground="red")
         self.dep_tree.tag_configure("stock", foreground="gray")
         self.dep_tree.pack(fill=tk.BOTH, expand=True)
 
     def _build_validation_tab(self):
-        columns = ("severity", "filename", "location", "message", "suggestion")
+        columns = ("severity", "filename", "line", "location", "message", "suggestion")
         self.issue_tree = ttk.Treeview(self.validation_tab, columns=columns, show="headings")
         self.issue_tree.heading("severity", text="Severity", command=lambda: self.sort_issue_column("severity", False))
         self.issue_tree.heading("filename", text="File", command=lambda: self.sort_issue_column("filename", False))
+        self.issue_tree.heading("line", text="Line")
         self.issue_tree.heading("location", text="Section / Key")
         self.issue_tree.heading("message", text="Finding")
         self.issue_tree.heading("suggestion", text="Suggested Fix")
         self.issue_tree.column("severity", width=90, stretch=False)
-        self.issue_tree.column("filename", width=150, stretch=False)
-        self.issue_tree.column("location", width=190, stretch=False)
-        self.issue_tree.column("message", width=430)
+        self.issue_tree.column("filename", width=145, stretch=False)
+        self.issue_tree.column("line", width=55, stretch=False, anchor=tk.CENTER)
+        self.issue_tree.column("location", width=180, stretch=False)
+        self.issue_tree.column("message", width=455)
         self.issue_tree.column("suggestion", width=300)
         self.issue_tree.tag_configure("critical", foreground="#b00020")
         self.issue_tree.tag_configure("error", foreground="red")
@@ -87,19 +98,54 @@ class BZNScannerApp:
 
         hint = tk.Label(
             self.validation_tab,
-            text="Double-click a finding for loader/source details. Validation is read-only; files are never modified.",
+            text=(
+                "Double-click a finding for rule/evidence details. Validation is read-only; "
+                "files are never modified. Folder and ZIP scans do not require a BZN."
+            ),
             fg="gray",
             anchor="w",
         )
         hint.pack(fill=tk.X, pady=(4, 0))
 
+    def _reset_source(self, kind, path):
+        self.source_kind = kind
+        self.source_path = path
+        self.current_file = path if kind == "bzn" else None
+        self.dependency_data = []
+        self.issue_data = []
+        self.referenced_only.set(False)
+        self.referenced_check.configure(state=tk.NORMAL if kind == "bzn" else tk.DISABLED)
+        self.refresh_dependencies()
+        self.refresh_issues()
+
     def load_file(self):
         path = filedialog.askopenfilename(filetypes=[("BZN Files", "*.bzn"), ("All Files", "*.*")])
-        if path:
-            self.current_file = path
-            self.analyze()
+        if not path:
+            return
+        self._reset_source("bzn", path)
+        self.analyze_bzn()
 
-    def analyze(self):
+    def load_folder(self):
+        path = filedialog.askdirectory(title="Select folder containing ODF files")
+        if not path:
+            return
+        self._reset_source("folder", path)
+        self.issue_data = validate_directory(path, known_odfs=STOCK_SET)
+        self.refresh_issues()
+        self._update_status()
+        self.notebook.select(self.validation_tab)
+
+    def load_zip(self):
+        path = filedialog.askopenfilename(filetypes=[("ZIP archives", "*.zip"), ("All Files", "*.*")])
+        if not path:
+            return
+        self._reset_source("zip", path)
+        self.issue_data = validate_zip(path, known_odfs=STOCK_SET)
+        self.refresh_issues()
+        self._update_status()
+        self.notebook.select(self.validation_tab)
+
+    def analyze_bzn(self):
         if not self.current_file:
             return
 
@@ -123,9 +169,19 @@ class BZNScannerApp:
             messagebox.showerror("Error", str(exc))
 
     def revalidate(self):
-        if self.current_file:
-            self._run_odf_validation(os.path.dirname(self.current_file))
+        if not self.source_kind or not self.source_path:
+            return
+        try:
+            if self.source_kind == "zip":
+                self.issue_data = validate_zip(self.source_path, known_odfs=STOCK_SET)
+            elif self.source_kind == "folder":
+                self.issue_data = validate_directory(self.source_path, known_odfs=STOCK_SET)
+            elif self.source_kind == "bzn":
+                self._run_odf_validation(os.path.dirname(self.source_path))
+            self.refresh_issues()
             self._update_status()
+        except Exception as exc:
+            messagebox.showerror("Error", str(exc))
 
     def _run_odf_validation(self, directory):
         filenames = None
@@ -143,18 +199,32 @@ class BZNScannerApp:
             return False
 
     def _update_status(self):
-        filename = os.path.basename(self.current_file) if self.current_file else ""
-        custom_missing = sum(1 for row in self.dependency_data if row[0] == "MISSING" and row[1] == "Custom")
         critical = sum(1 for issue in self.issue_data if issue.severity == "CRITICAL")
         errors = sum(1 for issue in self.issue_data if issue.severity == "ERROR")
         warnings = sum(1 for issue in self.issue_data if issue.severity == "WARNING")
-        self.status_lbl.config(
-            text=(
+
+        if self.source_kind == "bzn":
+            filename = os.path.basename(self.source_path)
+            custom_missing = sum(1 for row in self.dependency_data if row[0] == "MISSING" and row[1] == "Custom")
+            prefix = (
                 f"{filename}  |  {len(self.dependency_data)} BZN ODF references  |  "
-                f"{custom_missing} missing custom  |  "
-                f"ODF: {critical} critical, {errors} errors, {warnings} warnings"
-            ),
-            fg="black" if not critical else "#b00020",
+                f"{custom_missing} missing custom"
+            )
+        elif self.source_kind == "folder":
+            root = Path(self.source_path)
+            try:
+                odf_count = sum(1 for p in root.iterdir() if p.is_file() and p.suffix.lower() == ".odf")
+            except OSError:
+                odf_count = 0
+            prefix = f"Folder: {root.name or root}  |  {odf_count} ODF files"
+        elif self.source_kind == "zip":
+            prefix = f"ZIP: {os.path.basename(self.source_path)}"
+        else:
+            prefix = "No source loaded"
+
+        self.status_lbl.config(
+            text=f"{prefix}  |  ODF: {critical} critical, {errors} errors, {warnings} warnings",
+            fg="#b00020" if critical else ("red" if errors else "black"),
         )
 
     def refresh_dependencies(self):
@@ -176,45 +246,49 @@ class BZNScannerApp:
     def refresh_issues(self):
         for item in self.issue_tree.get_children():
             self.issue_tree.delete(item)
+        self.issue_lookup = {}
 
         for issue in self.issue_data:
             location = issue.section
             if issue.key:
                 location = f"{location} / {issue.key}" if location else issue.key
             tag = issue.severity.lower()
-            self.issue_tree.insert(
+            iid = self.issue_tree.insert(
                 "",
                 tk.END,
-                values=(issue.severity, issue.filename, location, issue.message, issue.suggestion),
+                values=(
+                    issue.severity,
+                    issue.filename,
+                    issue.line or "",
+                    location,
+                    issue.message,
+                    issue.suggestion,
+                ),
                 tags=(tag,),
             )
+            self.issue_lookup[iid] = issue
 
     def show_issue_details(self, _event=None):
         selection = self.issue_tree.selection()
         if not selection:
             return
-        item = selection[0]
-        values = self.issue_tree.item(item, "values")
-        if not values:
+        issue = self.issue_lookup.get(selection[0])
+        if issue is None:
             return
 
-        severity, filename, location, message, suggestion = values
-        matching = next(
-            (
-                issue for issue in self.issue_data
-                if issue.severity == severity
-                and issue.filename == filename
-                and ((f"{issue.section} / {issue.key}" if issue.key and issue.section else issue.section or issue.key) == location)
-                and issue.message == message
-            ),
-            None,
-        )
-        source = matching.source if matching else ""
-        detail = f"{severity}: {filename}\n{location}\n\n{message}"
-        if suggestion:
-            detail += f"\n\nSuggested fix:\n{suggestion}"
-        if source:
-            detail += f"\n\nEvidence / rule source:\n{source}"
+        location = issue.section
+        if issue.key:
+            location = f"{location} / {issue.key}" if location else issue.key
+        if issue.line:
+            location += f" (line {issue.line})"
+
+        detail = f"{issue.severity}: {issue.filename}\n{location}\n\n{issue.message}"
+        if issue.suggestion:
+            detail += f"\n\nSuggested fix:\n{issue.suggestion}"
+        if issue.rule_id:
+            detail += f"\n\nRule:\n{issue.rule_id}"
+        if issue.source:
+            detail += f"\n\nEvidence / rule source:\n{issue.source}"
         messagebox.showinfo("ODF Validation Finding", detail)
 
     def sort_dependency_column(self, column, reverse):
