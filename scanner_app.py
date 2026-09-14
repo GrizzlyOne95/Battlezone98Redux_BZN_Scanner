@@ -4,6 +4,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from bzn_scan import BZNParser, STOCK_SET
+from odf_evidence import resolve_evidence
 from odf_validator import validate_directory, validate_zip
 
 
@@ -287,8 +288,15 @@ class BZNScannerApp:
             detail += f"\n\nSuggested fix:\n{issue.suggestion}"
         if issue.rule_id:
             detail += f"\n\nRule:\n{issue.rule_id}"
-        if issue.source:
+
+        evidence = resolve_evidence(issue.evidence_ids)
+        if evidence:
+            detail += "\n\nStructured evidence:"
+            for item in evidence:
+                detail += f"\n\n{item.evidence_id}\n{item.summary()}"
+        elif issue.source:
             detail += f"\n\nEvidence / rule source:\n{issue.source}"
+
         messagebox.showinfo("ODF Validation Finding", detail)
 
     def sort_dependency_column(self, column, reverse):

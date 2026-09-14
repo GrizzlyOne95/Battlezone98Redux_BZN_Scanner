@@ -2,8 +2,9 @@
 
 The validator is intentionally conservative: it reports loader mismatches and
 known crash-risk omissions without rewriting user files. Rule data lives in
-odf_schema.py, while odf_inheritance.py resolves only inheritance that can be
-proven from the scanned package.
+odf_schema.py, structured provenance lives in odf_evidence.py, and
+odf_inheritance.py resolves only inheritance that can be proven from the
+scanned package.
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ class ODFIssue:
     source: str = ""
     rule_id: str = ""
     line: int = 0
+    evidence_ids: Tuple[str, ...] = ()
 
 
 @dataclass
@@ -68,6 +70,17 @@ class ODFDocument:
 
 def _unquote(value: str) -> str:
     return value.strip().strip('"').strip("'")
+
+
+def _merge_evidence_ids(*groups: Iterable[str]) -> Tuple[str, ...]:
+    out: List[str] = []
+    seen = set()
+    for group in groups:
+        for evidence_id in group:
+            if evidence_id and evidence_id not in seen:
+                seen.add(evidence_id)
+                out.append(evidence_id)
+    return tuple(out)
 
 
 def parse_odf_bytes(data: bytes, virtual_path: str | Path) -> ODFDocument:
@@ -118,6 +131,7 @@ def _issue(
     source: str = "",
     rule_id: str = "",
     line: int = 0,
+    evidence_ids: Iterable[str] = (),
 ) -> ODFIssue:
     return ODFIssue(
         severity=severity,
@@ -129,6 +143,7 @@ def _issue(
         source=source,
         rule_id=rule_id,
         line=line,
+        evidence_ids=tuple(evidence_ids),
     )
 
 
@@ -179,6 +194,7 @@ def _validate_loader_rules(
                 f"Rename [{local_section}] to [{rule.expected_section}].",
                 rule.source,
                 rule.rule_id,
+                evidence_ids=rule.evidence_ids,
             ))
 
         if local_section is not None:
@@ -204,6 +220,7 @@ def _validate_loader_rules(
                     rule.source,
                     rule.rule_id,
                     line,
+                    _merge_evidence_ids(rule.evidence_ids, alias.evidence_ids),
                 ))
 
             for legacy_key in rule.legacy_keys:
@@ -221,6 +238,7 @@ def _validate_loader_rules(
                     rule.source,
                     rule.rule_id,
                     line,
+                    _merge_evidence_ids(rule.evidence_ids, legacy_key.evidence_ids),
                 ))
 
         # A missing section is only meaningful when the entire inheritance
@@ -240,6 +258,7 @@ def _validate_loader_rules(
                 rule.missing_section_suggestion,
                 rule.source,
                 rule.rule_id,
+                evidence_ids=rule.evidence_ids,
             ))
             # Required keys cannot add useful information when the entire
             # loader section itself is absent.
@@ -252,6 +271,7 @@ def _validate_loader_rules(
             effective_keys = effective.keys(rule.expected_section)
             local_canonical_keys = doc.keys(rule.expected_section) if doc.has_section(rule.expected_section) else {}
             for required in rule.required_keys:
+                evidence_ids = _merge_evidence_ids(rule.evidence_ids, required.evidence_ids)
                 required_lower = required.name.lower()
                 local_entry = local_canonical_keys.get(required_lower)
                 if local_entry is not None and not _unquote(local_entry[0]):
@@ -265,6 +285,7 @@ def _validate_loader_rules(
                         rule.source,
                         rule.rule_id,
                         local_entry[1],
+                        evidence_ids,
                     ))
                     continue
 
@@ -283,6 +304,7 @@ def _validate_loader_rules(
                         rule.source,
                         rule.rule_id,
                         effective_entry[1] if effective_entry else 0,
+                        evidence_ids,
                     ))
 
     return issues
@@ -298,12 +320,12 @@ def _validate_references(doc: ODFDocument, available: set[str]) -> List[ODFIssue
     if not available:
         return issues
 
-    for section, keyspec in REFERENCE_KEYS.items():
+    for section, specs in REFERENCE_KEYS.items():
         if not doc.has_section(section):
             continue
         keys = doc.keys(section)
-        for canonical_key, severity in keyspec.items():
-            entry = keys.get(canonical_key.lower())
+        for spec in specs:
+            entry = keys.get(spec.name.lower())
             if not entry:
                 continue
             value, line, original_key = entry
@@ -320,7 +342,7 @@ def _validate_references(doc: ODFDocument, available: set[str]) -> List[ODFIssue
             suggestion = f"Did you mean '{close[0]}'?" if close else "Add the referenced ODF or correct the name."
             label = "payload" if section.lower() == "flaremineclass" else "ODF"
             issues.append(_issue(
-                severity,
+                spec.severity,
                 doc,
                 section,
                 original_key,
@@ -329,6 +351,7 @@ def _validate_references(doc: ODFDocument, available: set[str]) -> List[ODFIssue
                 f"{section} ODF dependency",
                 "reference-check",
                 line,
+                spec.evidence_ids,
             ))
 
     return issues
@@ -338,6 +361,8 @@ def _validate_inheritance(doc: ODFDocument, state: InheritanceState, duplicate_n
     ref = canonical_base_reference(doc)
     if ref is None:
         return []
+
+    evidence_ids = ("odf-basename-inheritance",)
 
     if duplicate_name:
         return [_issue(
@@ -350,6 +375,7 @@ def _validate_inheritance(doc: ODFDocument, state: InheritanceState, duplicate_n
             "ODF baseName inheritance namespace",
             "inheritance-ambiguous-name",
             ref.line,
+            evidence_ids,
         )]
 
     if state.status == "cycle":
@@ -364,6 +390,7 @@ def _validate_inheritance(doc: ODFDocument, state: InheritanceState, duplicate_n
             "ODF baseName inheritance graph",
             "inheritance-cycle",
             ref.line,
+            evidence_ids,
         )]
 
     if state.status == "ambiguous":
@@ -377,6 +404,7 @@ def _validate_inheritance(doc: ODFDocument, state: InheritanceState, duplicate_n
             "ODF baseName inheritance graph",
             "inheritance-ambiguous-parent",
             ref.line,
+            evidence_ids,
         )]
 
     if state.status == "missing":
@@ -390,6 +418,7 @@ def _validate_inheritance(doc: ODFDocument, state: InheritanceState, duplicate_n
             "ODF baseName inheritance graph",
             "inheritance-missing-parent",
             ref.line,
+            evidence_ids,
         )]
 
     # Opaque means a known stock parent exists but its contents are not bundled
@@ -577,6 +606,8 @@ def _cli_main() -> int:
             print(f"{issue.severity:8} {issue.filename}{line} {location} - {issue.message}")
             if issue.suggestion:
                 print(f"         fix: {issue.suggestion}")
+            if issue.evidence_ids:
+                print(f"         evidence: {', '.join(issue.evidence_ids)}")
         if not issues:
             print("No ODF validation findings.")
 
