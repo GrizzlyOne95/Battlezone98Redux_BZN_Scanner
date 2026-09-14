@@ -18,7 +18,7 @@ The current schema is intentionally incomplete. Unknown sections and keys are **
 
 ## Structured provenance
 
-Schema version 5 uses evidence IDs that resolve into `ODFEvidence` records. An evidence record can carry:
+Schema version 6 uses evidence IDs that resolve into `ODFEvidence` records. An evidence record can carry:
 
 - evidence kind,
 - confidence,
@@ -51,6 +51,7 @@ Redux executable addresses and BZ1_Source evidence are separate provenance domai
 | `scavenger` | `classLabel=scavenger` + `CraftClass` | `ScavengerClass` | `ScavengerCraftClass` | Error |
 | `flame-puff` | `classLabel=flamepuff` + `OrdnanceClass` | `FlamePuffClass` | `flameClass` | Error |
 | `explosion-section` | `classLabel=explosion` + `OrdnanceClass` | `ExplosionClass` | `Explosion` | Error |
+| `spray-building-section` | `[BuildingClass]` + exact legacy typo | `SprayBuildingClass` | `SprayBuildngClass` | Error |
 
 Context is important. Similar section names can be used in unrelated legacy content, so the scanner only applies migration rules when the surrounding loader path is proven.
 
@@ -118,6 +119,12 @@ damageRadius = 25
 
 is diagnosed because the `[Explosion]` keys are not consumed by the recovered loader. The scanner recommends `[ExplosionClass]` only in the proven `classLabel=explosion` + `OrdnanceClass` context; it does not globally rename arbitrary `[Explosion]` sections.
 
+## Spray-building spelling contract
+
+The loader audit also found an exact stock-content typo: four spray-building ODFs use `[SprayBuildngClass]` while recovered code reads `[SprayBuildingClass]`. The misspelled section has no recovered reader, so the fields under it are dead even though the rest of the building ODF can load normally.
+
+The validator intentionally does not guess a class label for this rule. It reports the exact `[SprayBuildngClass]` typo only when the same ODF also contains `[BuildingClass]`; unrelated files that happen to contain the same text are left alone.
+
 ## ODF references
 
 The schema currently validates these ODF-valued fields against the combined local + stock filename namespace:
@@ -155,6 +162,7 @@ The test suite verifies:
 - flame-puff legacy fields and `frameDelay` spelling,
 - legacy `GameObject` root dispatch,
 - explosion `[Explosion]` vs `[ExplosionClass]` section consumption with a negative control,
+- spray-building `SprayBuildngClass` vs `SprayBuildingClass` spelling with canonical and unrelated-file controls,
 - ODF reference typo detection,
 - ZIP validation without extraction,
 - no fabricated `baseName` ODF merging, cycles, missing-parent, or duplicate-parent diagnostics,
