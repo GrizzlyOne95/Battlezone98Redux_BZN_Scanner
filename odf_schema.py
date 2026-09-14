@@ -226,6 +226,21 @@ LOADER_RULES = (
             ),
         ),
     ),
+    LoaderRule(
+        rule_id="explosion-section",
+        expected_section="ExplosionClass",
+        legacy_sections=("Explosion",),
+        class_labels=("explosion",),
+        required_sections=("OrdnanceClass",),
+        section_severity="ERROR",
+        section_message=(
+            "This ODF dispatches the explosion ordnance path, but Redux reads "
+            "explosion-specific fields from [ExplosionClass]. Keys placed under "
+            "legacy [Explosion] are not consumed by that loader."
+        ),
+        source="Recovered Redux ExplosionClass loader contract",
+        evidence_ids=("redux-explosionclass-contract",),
+    ),
 )
 
 
@@ -245,4 +260,4 @@ REFERENCE_KEYS = {
 }
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
