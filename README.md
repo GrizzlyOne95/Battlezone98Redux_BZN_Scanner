@@ -1,8 +1,28 @@
-# Battlezone98Redux BZN Scanner
+# Battlezone BZN Scanner
 
 A Battlezone 98 Redux mission preflight utility. It scans ASCII or binary `.BZN` files for referenced ODFs, classifies them as stock/custom, checks custom dependencies, and validates local or packaged ODF files against known Redux loader behavior.
 
 <img width="802" height="632" alt="BZN Scanner" src="https://github.com/user-attachments/assets/5fc44ce6-5d20-45b0-8089-e2d475c86ea7" />
+
+## Release builds
+
+Download the latest platform archive from the Releases page. Executable names are intentionally stable and versionless:
+
+- Windows: `BZBZNScanner.exe`
+- Linux/macOS: `BZBZNScanner`
+
+Release archives carry the version, for example `Battlezone98Redux_BZN_Scanner-v1.2.3-windows.zip`.
+
+Official Windows builds use the shared Battlezone Modding Tools product identity:
+
+```text
+FileDescription: Battlezone BZN Scanner
+ProductName: Battlezone Modding Tools
+CompanyName: GrizzlyOne95
+OriginalFilename: BZBZNScanner.exe
+```
+
+`FileVersion` and `ProductVersion` are derived from the Git release tag.
 
 ## Scan modes
 
