@@ -1,4 +1,5 @@
 import os
+import sys
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -8,12 +9,67 @@ from odf_evidence import resolve_evidence
 from odf_validator import validate_directory, validate_zip
 
 
+APP_USER_MODEL_ID = "GrizzlyOne95.Battlezone98Redux.BZNScanner"
+
+
+def _set_app_user_model_id():
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+    except Exception:
+        pass
+
+
+def _resolve_bundled_icon(name):
+    """Locate a bundled icon working from source and under sys._MEIPASS."""
+    candidates = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(os.path.join(meipass, "branding", name))
+        candidates.append(os.path.join(meipass, name))
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates.append(os.path.join(here, "branding", name))
+    candidates.append(os.path.join(here, name))
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def apply_window_icon(window):
+    """Apply the canonical (BZNTools) app icon to a Tk/Toplevel window."""
+    try:
+        ico_path = _resolve_bundled_icon("app_icon.ico")
+        if ico_path:
+            try:
+                window.iconbitmap(ico_path)
+            except Exception:
+                pass
+        png_path = _resolve_bundled_icon("app_icon.png")
+        if png_path:
+            try:
+                image = tk.PhotoImage(file=png_path)
+                window.iconphoto(True, image)
+                window._battlezone_app_icon = image
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+_set_app_user_model_id()
+
+
 SEVERITY_ORDER = {"CRITICAL": 0, "ERROR": 1, "WARNING": 2, "INFO": 3}
 
 
 class BZNScannerApp:
     def __init__(self, root):
         self.root = root
+        apply_window_icon(self.root)
         self.root.title("BZ98R Mission Scanner")
         self.root.geometry("1280x760")
 
