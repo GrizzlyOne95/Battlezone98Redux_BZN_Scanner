@@ -10,13 +10,22 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
+        include:
+          - os: windows-latest
+            platform: windows
+            artifact_name: BZBZNScanner.exe
+          - os: ubuntu-latest
+            platform: linux
+            artifact_name: BZBZNScanner
+          - os: macos-latest
+            platform: macos
+            artifact_name: BZBZNScanner
 
     steps:
     - uses: actions/checkout@v4
 
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: '3.11'
 
@@ -31,50 +40,31 @@ jobs:
     - name: Generate canonical app icon (BZNTools artwork)
       run: python scripts/generate_app_icon.py branding/app_icon.svg branding/app_icon.ico --png branding/app_icon.png
 
+    - name: Generate Windows version metadata
+      if: runner.os == 'Windows'
+      run: |
+        python scripts/generate_version_info.py --version "${{ github.ref_name }}" --output branding/version_info.txt
+
     - name: Build executable (Windows)
       if: runner.os == 'Windows'
       run: |
-        pyinstaller --onefile --windowed --name "bzn_scan" --icon "branding/app_icon.ico" --add-data "branding/app_icon.ico;branding" --add-data "branding/app_icon.png;branding" --runtime-hook branding/pyinstaller_icon_hook.py scanner_app.py
-        move dist\bzn_scan.exe dist\bzn_scan-windows.exe
+        pyinstaller --onefile --windowed --name "BZBZNScanner" --icon "branding/app_icon.ico" --version-file "branding/version_info.txt" --add-data "branding/app_icon.ico;branding" --add-data "branding/app_icon.png;branding" --runtime-hook branding/pyinstaller_icon_hook.py scanner_app.py
 
     - name: Build executable (Linux)
       if: runner.os == 'Linux'
       run: |
-        pyinstaller --onefile --name "bzn_scan" --icon "branding/app_icon.ico" --add-data "branding/app_icon.ico:branding" --add-data "branding/app_icon.png:branding" --runtime-hook branding/pyinstaller_icon_hook.py scanner_app.py
-        mv dist/bzn_scan dist/bzn_scan-linux
+        pyinstaller --onefile --name "BZBZNScanner" --icon "branding/app_icon.ico" --add-data "branding/app_icon.ico:branding" --add-data "branding/app_icon.png:branding" --runtime-hook branding/pyinstaller_icon_hook.py scanner_app.py
 
     - name: Build executable (macOS)
       if: runner.os == 'macOS'
       run: |
-        pyinstaller --onefile --windowed --name "bzn_scan" --icon "branding/app_icon.ico" --add-data "branding/app_icon.ico:branding" --add-data "branding/app_icon.png:branding" --runtime-hook branding/pyinstaller_icon_hook.py scanner_app.py
-        mv dist/bzn_scan dist/bzn_scan-macos
+        pyinstaller --onefile --windowed --name "BZBZNScanner" --icon "branding/app_icon.ico" --add-data "branding/app_icon.ico:branding" --add-data "branding/app_icon.png:branding" --runtime-hook branding/pyinstaller_icon_hook.py scanner_app.py
 
-    - name: List build artifacts
-      run: |
-        echo "Checking dist directory..."
-        if [ -d "dist" ]; then ls -la dist/; else echo "dist directory not found"; fi
-      shell: bash
-
-    - name: Upload artifacts (Windows)
-      if: runner.os == 'Windows' && hashFiles('dist/bzn_scan-windows.exe') != ''
+    - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: bzn_scan-windows
-        path: dist/bzn_scan-windows.exe
-
-    - name: Upload artifacts (Linux)
-      if: runner.os == 'Linux' && hashFiles('dist/bzn_scan-linux') != ''
-      uses: actions/upload-artifact@v4
-      with:
-        name: bzn_scan-linux
-        path: dist/bzn_scan-linux
-
-    - name: Upload artifacts (macOS)
-      if: runner.os == 'macOS' && hashFiles('dist/bzn_scan-macos') != ''
-      uses: actions/upload-artifact@v4
-      with:
-        name: bzn_scan-macos
-        path: dist/bzn_scan-macos
+        name: Battlezone98Redux_BZN_Scanner-${{ matrix.platform }}
+        path: dist/${{ matrix.artifact_name }}
 
   release:
     needs: build
@@ -84,23 +74,37 @@ jobs:
       contents: write
 
     steps:
-    - uses: actions/checkout@v4
-
     - name: Download all artifacts
       uses: actions/download-artifact@v4
-      continue-on-error: true
+      with:
+        path: release-artifacts
 
-    - name: List artifacts
+    - name: Package release archives
+      shell: bash
       run: |
-        echo "Artifacts downloaded:"
-        find . -type f -name "bzn_scan*" 2>/dev/null || echo "No artifacts found"
+        set -euo pipefail
+        mkdir -p release-packages/windows release-packages/linux release-packages/macos
+
+        cp release-artifacts/Battlezone98Redux_BZN_Scanner-windows/BZBZNScanner.exe release-packages/windows/
+        cp release-artifacts/Battlezone98Redux_BZN_Scanner-linux/BZBZNScanner release-packages/linux/
+        cp release-artifacts/Battlezone98Redux_BZN_Scanner-macos/BZBZNScanner release-packages/macos/
+
+        chmod +x release-packages/linux/BZBZNScanner release-packages/macos/BZBZNScanner
+
+        (cd release-packages/windows && zip -q ../Battlezone98Redux_BZN_Scanner-${GITHUB_REF_NAME}-windows.zip BZBZNScanner.exe)
+        (cd release-packages/linux && tar -czf ../Battlezone98Redux_BZN_Scanner-${GITHUB_REF_NAME}-linux.tar.gz BZBZNScanner)
+        (cd release-packages/macos && tar -czf ../Battlezone98Redux_BZN_Scanner-${GITHUB_REF_NAME}-macos.tar.gz BZBZNScanner)
+
+        ls -lh release-packages/
 
     - name: Create Release
-      uses: softprops/action-gh-release@v1
+      uses: softprops/action-gh-release@v2
       with:
-        token: ${{ secrets.GITHUB_TOKEN }}
         files: |
-          bzn_scan-windows/bzn_scan-windows.exe
-          bzn_scan-linux/bzn_scan-linux
-          bzn_scan-macos/bzn_scan-macos
-        fail_on_unmatched_files: false
+          release-packages/Battlezone98Redux_BZN_Scanner-v*-windows.zip
+          release-packages/Battlezone98Redux_BZN_Scanner-v*-linux.tar.gz
+          release-packages/Battlezone98Redux_BZN_Scanner-v*-macos.tar.gz
+        fail_on_unmatched_files: true
+        generate_release_notes: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
