@@ -2,6 +2,8 @@ name: Build and Release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
 
@@ -40,10 +42,21 @@ jobs:
     - name: Generate canonical app icon (BZNTools artwork)
       run: python scripts/generate_app_icon.py branding/app_icon.svg branding/app_icon.ico --png branding/app_icon.png
 
+    - name: Resolve package version
+      id: version
+      shell: bash
+      run: |
+        if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+          version="${GITHUB_REF_NAME#v}"
+        else
+          version="$(tr -d '[:space:]' < VERSION)"
+        fi
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+
     - name: Generate Windows version metadata
       if: runner.os == 'Windows'
       run: |
-        python scripts/generate_version_info.py --version "${{ github.ref_name }}" --output branding/version_info.txt
+        python scripts/generate_version_info.py --version "${{ steps.version.outputs.version }}" --output branding/version_info.txt
 
     - name: Build executable (Windows)
       if: runner.os == 'Windows'
@@ -69,11 +82,24 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
-    if: success()
+    if: "${{ success() && (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'push' && github.ref == 'refs/heads/main' && startsWith(github.event.head_commit.message, 'chore(release): v'))) }}"
     permissions:
       contents: write
 
     steps:
+    - uses: actions/checkout@v4
+
+    - name: Resolve release tag
+      id: release_version
+      shell: bash
+      run: |
+        if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+          tag="$GITHUB_REF_NAME"
+        else
+          tag="v$(tr -d '[:space:]' < VERSION)"
+        fi
+        echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
     - name: Download all artifacts
       uses: actions/download-artifact@v4
       with:
@@ -81,6 +107,8 @@ jobs:
 
     - name: Package release archives
       shell: bash
+      env:
+        RELEASE_TAG: ${{ steps.release_version.outputs.tag }}
       run: |
         set -euo pipefail
         mkdir -p release-packages/windows release-packages/linux release-packages/macos
@@ -91,15 +119,18 @@ jobs:
 
         chmod +x release-packages/linux/BZBZNScanner release-packages/macos/BZBZNScanner
 
-        (cd release-packages/windows && zip -q ../Battlezone98Redux_BZN_Scanner-${GITHUB_REF_NAME}-windows.zip BZBZNScanner.exe)
-        (cd release-packages/linux && tar -czf ../Battlezone98Redux_BZN_Scanner-${GITHUB_REF_NAME}-linux.tar.gz BZBZNScanner)
-        (cd release-packages/macos && tar -czf ../Battlezone98Redux_BZN_Scanner-${GITHUB_REF_NAME}-macos.tar.gz BZBZNScanner)
+        (cd release-packages/windows && zip -q ../Battlezone98Redux_BZN_Scanner-${RELEASE_TAG}-windows.zip BZBZNScanner.exe)
+        (cd release-packages/linux && tar -czf ../Battlezone98Redux_BZN_Scanner-${RELEASE_TAG}-linux.tar.gz BZBZNScanner)
+        (cd release-packages/macos && tar -czf ../Battlezone98Redux_BZN_Scanner-${RELEASE_TAG}-macos.tar.gz BZBZNScanner)
 
         ls -lh release-packages/
 
     - name: Create Release
       uses: softprops/action-gh-release@v2
       with:
+        tag_name: ${{ steps.release_version.outputs.tag }}
+        name: ${{ steps.release_version.outputs.tag }}
+        target_commitish: ${{ github.sha }}
         files: |
           release-packages/Battlezone98Redux_BZN_Scanner-v*-windows.zip
           release-packages/Battlezone98Redux_BZN_Scanner-v*-linux.tar.gz
